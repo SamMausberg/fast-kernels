@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, cast
 
 from fast_kernels.native import native_build_info, native_module
@@ -501,9 +502,8 @@ def _autotune_arc_split_k_slices(
 
         samples: list[float] = []
         for _ in range(4):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            torch.cuda.synchronize()
+            start = perf_counter()
             _run_scalar_once(
                 native,
                 activations,
@@ -519,9 +519,8 @@ def _autotune_arc_split_k_slices(
                 partials=partials,
                 stream_ptr=stream_ptr,
             )
-            end.record()
-            end.synchronize()
-            samples.append(float(start.elapsed_time(end)) * 1000.0)
+            torch.cuda.synchronize()
+            samples.append((perf_counter() - start) * 1_000_000.0)
 
         candidate_us = min(samples)
         if best_us is None or candidate_us < best_us:
@@ -668,13 +667,11 @@ def _autotune_arc_impl(
 
         samples: list[float] = []
         for _ in range(4):
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record()
+            torch.cuda.synchronize()
+            start = perf_counter()
             run_candidate()
-            end.record()
-            end.synchronize()
-            samples.append(float(start.elapsed_time(end)) * 1000.0)
+            torch.cuda.synchronize()
+            samples.append((perf_counter() - start) * 1_000_000.0)
 
         candidate_us = min(samples)
         if best_us is None or candidate_us < best_us:

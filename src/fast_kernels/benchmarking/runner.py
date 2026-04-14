@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from fast_kernels.benchmarking.clustered_page_decode import run_clustered_page_decode_suite
 from fast_kernels.benchmarking.decode_linear_w4a16 import run_decode_linear_w4a16_suite
 from fast_kernels.benchmarking.suites import load_suite
 from fast_kernels.env import collect_environment
@@ -96,6 +97,8 @@ def _materialize_cases(suite: BenchmarkSuite) -> list[BenchmarkCase]:
 def _execute_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[str]]:
     if suite.id == "decode_linear_w4a16":
         return run_decode_linear_w4a16_suite(suite)
+    if suite.family == "clustered_page_decode":
+        return run_clustered_page_decode_suite(suite)
 
     return (
         _materialize_cases(suite),

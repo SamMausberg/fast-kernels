@@ -1,0 +1,65 @@
+schema_version = 1
+id = "clustered_page_decode"
+family = "clustered_page_decode"
+description = "Clustered page-stream decode suite for paged KV attention with GQA/MQA reuse."
+metric = "tokens_per_second"
+tags = ["decode", "attention", "paged_kv", "gqa", "blackwell"]
+dtypes = ["bf16"]
+layouts = ["bf16_kv", "fp8_kv", "int8_kv"]
+
+[kernels]
+ids = [
+  "decode/clustered_page_decode_auto",
+  "decode/clustered_page_decode_direct",
+  "decode/clustered_page_decode_clustered",
+]
+
+[baselines]
+ids = [
+  "torch/reference_clustered_page_decode",
+  "vendor/flashinfer_clustered_page_decode",
+]
+
+[tolerances]
+atol = 0.125
+rtol = 0.03
+
+[[shapes]]
+name = "gqa4_short_page16"
+batch = 4
+page_size = 16
+max_seq_len = 256
+num_q_heads = 32
+num_kv_heads = 8
+head_dim = 128
+gqa_group_size = 4
+
+[[shapes]]
+name = "gqa4_long_page16"
+batch = 4
+page_size = 16
+max_seq_len = 2048
+num_q_heads = 32
+num_kv_heads = 8
+head_dim = 128
+gqa_group_size = 4
+
+[[shapes]]
+name = "mqa8_long_page32"
+batch = 2
+page_size = 32
+max_seq_len = 4096
+num_q_heads = 32
+num_kv_heads = 4
+head_dim = 128
+gqa_group_size = 8
+
+[[shapes]]
+name = "gqa2_short_page32_h64"
+batch = 8
+page_size = 32
+max_seq_len = 512
+num_q_heads = 16
+num_kv_heads = 8
+head_dim = 64
+gqa_group_size = 2

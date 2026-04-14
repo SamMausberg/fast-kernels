@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from functools import partial
 from statistics import median
+from time import perf_counter
 from typing import Any, Literal
 
 from fast_kernels.ops import (
@@ -132,13 +133,11 @@ def _time_callable(fn: Any, torch: Any) -> tuple[float, float]:
 
     samples_us: list[float] = []
     for _ in range(TIMING_ITERS):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+        torch.cuda.synchronize()
+        start = perf_counter()
         fn()
-        end.record()
-        end.synchronize()
-        samples_us.append(float(start.elapsed_time(end)) * 1000.0)
+        torch.cuda.synchronize()
+        samples_us.append((perf_counter() - start) * 1_000_000.0)
 
     return float(median(samples_us)), _p95(samples_us)
 
@@ -420,11 +419,11 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
             for shape in suite.shapes:
                 dimensions = shape.dimensions()
                 batch = shape.batch
-                n = shape.n
-                k = shape.k
+                n = shape.require_dimension("n")
+                k = shape.require_dimension("k")
 
                 skip_reason: str | None = dtype_reason or layout_reason
-                if skip_reason is None and shape.m != 1:
+                if skip_reason is None and shape.require_dimension("m") != 1:
                     skip_reason = "decode suite currently requires shape.m == 1"
                 if skip_reason is None and n % 128 != 0:
                     skip_reason = "decode suite requires n to be divisible by 128"

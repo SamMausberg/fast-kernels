@@ -11,24 +11,25 @@ from fast_kernels.schemas import BenchmarkCase, ResultBundle
 
 
 def _case_to_row(case: BenchmarkCase) -> dict[str, Any]:
-    return {
+    row: dict[str, Any] = {
         "case_id": case.case_id,
         "subject_kind": case.subject_kind,
         "subject_id": case.subject_id,
         "dtype": case.dtype,
         "layout": case.layout,
         "shape_name": case.shape_name,
-        "m": case.dimensions["m"],
-        "n": case.dimensions["n"],
-        "k": case.dimensions["k"],
-        "batch": case.dimensions["batch"],
         "status": case.status,
         "latency_us_median": case.latency_us_median,
         "latency_us_p95": case.latency_us_p95,
         "throughput": case.throughput,
         "reason": case.reason,
         "speedup_vs": json.dumps(case.speedup_vs, sort_keys=True),
+        "metrics": json.dumps(case.metrics, sort_keys=True),
+        "dimensions": json.dumps(case.dimensions, sort_keys=True),
     }
+    for key in ("m", "n", "k", "batch"):
+        row[key] = case.dimensions.get(key)
+    return row
 
 
 def load_result_bundle(run_dir: str | Path) -> ResultBundle:

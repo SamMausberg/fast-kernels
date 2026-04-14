@@ -34,6 +34,7 @@ class BenchmarkCase(BaseModel):
     latency_us_p95: float | None = None
     throughput: float | None = None
     speedup_vs: dict[str, float] = Field(default_factory=dict)
+    metrics: dict[str, float] = Field(default_factory=dict)
     reason: str | None = None
 
 

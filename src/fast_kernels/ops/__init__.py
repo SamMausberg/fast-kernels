@@ -1,3 +1,16 @@
+from fast_kernels.ops.clustered_page_decode import (
+    ClusteredPageDecodePlan,
+    PagedKVCache,
+    clustered_page_decode,
+    cuda_clustered_decode_available,
+    estimate_page_decode_metrics,
+    materialize_reference_dense_kv,
+    pack_paged_kv_bf16,
+    plan_clustered_page_decode,
+    quantize_paged_kv_fp8,
+    quantize_paged_kv_int8,
+    reference_clustered_page_decode,
+)
 from fast_kernels.ops.decode_quant_linear import (
     arc_packet_stride_bytes,
     arc_w4a16_forward,
@@ -10,12 +23,23 @@ from fast_kernels.ops.decode_quant_linear import (
 )
 
 __all__ = [
+    "ClusteredPageDecodePlan",
+    "PagedKVCache",
     "arc_packet_stride_bytes",
     "arc_w4a16_supported_impls",
     "arc_w4a16_forward",
     "cublaslt_fp16_after_dequant",
+    "clustered_page_decode",
+    "cuda_clustered_decode_available",
     "cuda_decode_available",
     "dequant_w4a16_to_fp16",
+    "estimate_page_decode_metrics",
     "group_size_for_layout",
+    "materialize_reference_dense_kv",
     "pack_arc_w4a16_packets",
+    "pack_paged_kv_bf16",
+    "plan_clustered_page_decode",
+    "quantize_paged_kv_fp8",
+    "quantize_paged_kv_int8",
+    "reference_clustered_page_decode",
 ]

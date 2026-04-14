@@ -32,3 +32,25 @@ def test_decode_linear_suite_loads() -> None:
 def test_decode_linear_suite_verifies() -> None:
     suite = load_suite(Path("benchmarks/suites/decode_linear_w4a16.toml"))
     assert verify_suite(suite) == []
+
+
+def test_clustered_page_decode_suite_loads() -> None:
+    suite = load_suite(Path("benchmarks/suites/clustered_page_decode.toml"))
+    assert suite.id == "clustered_page_decode"
+    assert suite.family == "clustered_page_decode"
+    assert suite.kernels.ids == [
+        "decode/clustered_page_decode_auto",
+        "decode/clustered_page_decode_direct",
+        "decode/clustered_page_decode_clustered",
+    ]
+    assert suite.baselines.ids == [
+        "torch/reference_clustered_page_decode",
+        "vendor/flashinfer_clustered_page_decode",
+    ]
+    assert suite.layouts == ["bf16_kv", "fp8_kv", "int8_kv"]
+    assert len(suite.shapes) == 4
+
+
+def test_clustered_page_decode_suite_verifies() -> None:
+    suite = load_suite(Path("benchmarks/suites/clustered_page_decode.toml"))
+    assert verify_suite(suite) == []

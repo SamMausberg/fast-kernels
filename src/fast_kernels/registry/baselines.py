@@ -37,4 +37,22 @@ def baseline_registry() -> dict[str, BaselineSpec]:
             description="cuBLASLt GEMM baseline placeholder.",
             maturity="scaffold",
         ),
+        "torch/reference_clustered_page_decode": BaselineSpec(
+            baseline_id="torch/reference_clustered_page_decode",
+            source="framework",
+            description=(
+                "Torch exact paged decode reference with in-kernel-equivalent "
+                "RoPE semantics."
+            ),
+            maturity="experimental",
+        ),
+        "vendor/flashinfer_clustered_page_decode": BaselineSpec(
+            baseline_id="vendor/flashinfer_clustered_page_decode",
+            source="vendor",
+            description=(
+                "FlashInfer paged batch decode baseline adapter when the runtime "
+                "is available."
+            ),
+            maturity="experimental",
+        ),
     }

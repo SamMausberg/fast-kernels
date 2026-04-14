@@ -17,3 +17,16 @@ def test_decode_suite_writes_artifacts_when_skipped(tmp_path: Path) -> None:
     statuses = {case.status for case in bundle.cases}
     assert statuses <= {"ok", "skipped", "failed"}
     assert (run_dir / "summary.md").exists()
+
+
+def test_clustered_page_decode_suite_writes_artifacts_when_skipped(tmp_path: Path) -> None:
+    run_dir = benchmark_suite(
+        Path("benchmarks/suites/clustered_page_decode.toml"),
+        output_root=tmp_path,
+    )
+    bundle = load_result_bundle(run_dir)
+    assert bundle.metadata.suite_id == "clustered_page_decode"
+    assert bundle.cases
+    statuses = {case.status for case in bundle.cases}
+    assert statuses <= {"ok", "skipped", "failed"}
+    assert (run_dir / "summary.md").exists()

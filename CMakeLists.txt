@@ -66,6 +66,7 @@ if(FK_ENABLE_CUDA)
     PRIVATE
       csrc/kernels/template/noop.cu
       csrc/kernels/decode_quant_linear/arc_w4a16.cu
+      csrc/kernels/clustered_page_decode/clustered_page_decode.cu
   )
   target_link_libraries(_native PRIVATE CUDA::cudart CUDA::cublasLt CUDA::cublas)
   target_compile_definitions(

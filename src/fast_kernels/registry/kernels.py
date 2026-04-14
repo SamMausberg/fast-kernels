@@ -61,4 +61,31 @@ def kernel_registry() -> dict[str, KernelSpec]:
             maturity="scaffold",
             ptx_hotspots=False,
         ),
+        "decode/clustered_page_decode_auto": KernelSpec(
+            kernel_id="decode/clustered_page_decode_auto",
+            family="clustered_page_decode",
+            description=(
+                "Auto-selected clustered page-stream decode path with direct-vs-clustered dispatch."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
+        "decode/clustered_page_decode_direct": KernelSpec(
+            kernel_id="decode/clustered_page_decode_direct",
+            family="clustered_page_decode",
+            description=(
+                "Single-cluster direct page-stream decode path for short-context paged attention."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
+        "decode/clustered_page_decode_clustered": KernelSpec(
+            kernel_id="decode/clustered_page_decode_clustered",
+            family="clustered_page_decode",
+            description=(
+                "Multi-block clustered page-stream decode path with exact local state merging."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
     }
