@@ -1,0 +1,33 @@
+schema_version = 1
+id = "template_gemm"
+family = "gemm"
+description = "Scaffold-only GEMM suite for verifying result artifacts, registration flow, and reporting."
+metric = "latency_us"
+tags = ["scaffold", "inference", "gemm"]
+dtypes = ["fp16", "bf16"]
+layouts = ["row_major"]
+
+[kernels]
+ids = ["template/noop_gemm"]
+
+[baselines]
+ids = ["torch/reference_gemm", "vendor/cublaslt_gemm"]
+
+[tolerances]
+atol = 0.001
+rtol = 0.001
+
+[[shapes]]
+name = "decode_small"
+m = 1
+n = 4096
+k = 11008
+batch = 1
+
+[[shapes]]
+name = "prefill_medium"
+m = 128
+n = 4096
+k = 11008
+batch = 1
+

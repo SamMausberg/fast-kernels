@@ -1,0 +1,33 @@
+name: gpu-manual
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite path"
+        required: true
+        default: "benchmarks/suites/template_gemm.toml"
+
+jobs:
+  gpu:
+    runs-on: [self-hosted, linux, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v6
+      - name: Sync CUDA environment
+        env:
+          CMAKE_ARGS: -DFK_ENABLE_CUDA=ON
+        run: uv sync --frozen --extra benchmark
+      - name: Verify suite
+        run: uv run fk verify "${{ inputs.suite }}"
+      - name: Materialize run
+        run: uv run fk bench "${{ inputs.suite }}"
+      - name: Upload result artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: results/
+

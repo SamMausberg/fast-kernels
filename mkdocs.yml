@@ -1,0 +1,9 @@
+site_name: fast-kernels
+site_description: Benchmark-first CUDA kernel experiments for public research and performance work.
+theme:
+  name: material
+nav:
+  - Overview: index.md
+  - Methodology: methodology.md
+  - Development: development.md
+  - Adding a Kernel: adding-a-kernel.md

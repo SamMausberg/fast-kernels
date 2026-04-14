@@ -1,0 +1,46 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 4,
+    "minor": 2,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/cmake/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "CPU-only native build",
+      "cacheVariables": {
+        "FK_ENABLE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "cuda-release",
+      "inherits": "base",
+      "displayName": "CUDA 13.x native build",
+      "cacheVariables": {
+        "FK_ENABLE_CUDA": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev"
+    },
+    {
+      "name": "cuda-release",
+      "configurePreset": "cuda-release"
+    }
+  ]
+}
+

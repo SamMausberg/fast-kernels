@@ -1,0 +1,20 @@
+name: Bug report
+description: Report a correctness, tooling, or benchmark artifact issue.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the issue and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Include commands, suite paths, and environment details.
+    validations:
+      required: true
+

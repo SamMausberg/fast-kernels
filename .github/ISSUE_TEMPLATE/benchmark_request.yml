@@ -1,0 +1,20 @@
+name: Benchmark request
+description: Propose a new workload, suite, or baseline.
+title: "[bench] "
+labels: ["benchmark"]
+body:
+  - type: input
+    id: workload
+    attributes:
+      label: Workload
+      description: Name the workload or operator family.
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Explain why this benchmark should exist and what it should compare against.
+    validations:
+      required: true
+
