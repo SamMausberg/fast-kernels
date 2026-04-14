@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, cast
 
 from fast_kernels.native import native_build_info, native_module
 
@@ -105,7 +106,8 @@ def _device_index(device: Any) -> int:
 
 def _cuda_capability(device: Any) -> tuple[int, int]:
     torch = _require_torch()
-    return tuple(int(x) for x in torch.cuda.get_device_capability(device))
+    capability = torch.cuda.get_device_capability(device)
+    return cast(tuple[int, int], tuple(int(x) for x in capability))
 
 
 def _capability_gte(actual: tuple[int, int], required: tuple[int, int]) -> bool:
@@ -583,6 +585,7 @@ def _autotune_arc_impl(
     best_us: float | None = None
 
     for candidate in candidates:
+        run_candidate: Callable[[], None]
         if candidate == _ARC_IMPL_SCALAR:
             chosen_split_k = (
                 _autotune_arc_split_k_slices(
@@ -609,7 +612,7 @@ def _autotune_arc_impl(
                     split_k_slices=chosen_split_k,
                 )
 
-            def _run_candidate(
+            def run_candidate(
                 *,
                 _chosen_split_k: int = chosen_split_k,
                 _partials: Any | None = partials,
@@ -638,7 +641,7 @@ def _autotune_arc_impl(
                 workspace_bytes=workspace_bytes,
             )
 
-            def _run_candidate(
+            def run_candidate(
                 *,
                 _weight_buffer: Any = weight_buffer,
                 _workspace: Any | None = workspace,
@@ -661,14 +664,14 @@ def _autotune_arc_impl(
                 )
 
         for _ in range(2):
-            _run_candidate()
+            run_candidate()
 
         samples: list[float] = []
         for _ in range(4):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            _run_candidate()
+            run_candidate()
             end.record()
             end.synchronize()
             samples.append(float(start.elapsed_time(end)) * 1000.0)
