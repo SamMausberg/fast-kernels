@@ -24,18 +24,24 @@ That benchmark command writes a run under `results/template_gemm/<run-id>/`.
 
 ## CUDA build
 
-Editable installs default to `FK_ENABLE_CUDA=OFF` so the repo works on CPU-only CI and non-GPU machines.
+Editable installs default to `FK_ENABLE_CUDA=ON` and build for the active GPU architecture.
 
-To build with CUDA enabled:
+Default CUDA setup:
 
 ```bash
-CMAKE_ARGS=-DFK_ENABLE_CUDA=ON uv sync --extra benchmark
+uv sync --extra benchmark
 uv run fk env
+```
+
+CPU-only opt-out:
+
+```bash
+CMAKE_ARGS=-DFK_ENABLE_CUDA=OFF uv sync
 ```
 
 For direct CMake builds:
 
 ```bash
-cmake --preset cuda-release
-cmake --build --preset cuda-release
+cmake --preset dev
+cmake --build --preset dev
 ```

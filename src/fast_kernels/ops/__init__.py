@@ -1,5 +1,6 @@
 from fast_kernels.ops.decode_quant_linear import (
     arc_packet_stride_bytes,
+    arc_w4a16_supported_impls,
     arc_w4a16_forward,
     cublaslt_fp16_after_dequant,
     cuda_decode_available,
@@ -10,6 +11,7 @@ from fast_kernels.ops.decode_quant_linear import (
 
 __all__ = [
     "arc_packet_stride_bytes",
+    "arc_w4a16_supported_impls",
     "arc_w4a16_forward",
     "cublaslt_fp16_after_dequant",
     "cuda_decode_available",

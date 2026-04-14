@@ -14,7 +14,13 @@ uv run pytest
 For CUDA-backed development:
 
 ```bash
-CMAKE_ARGS=-DFK_ENABLE_CUDA=ON uv sync --extra benchmark
+uv sync --extra benchmark
+```
+
+For CPU-only validation:
+
+```bash
+CMAKE_ARGS=-DFK_ENABLE_CUDA=OFF uv sync
 ```
 
 ## Adding work

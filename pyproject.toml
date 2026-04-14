@@ -40,6 +40,7 @@ fk = "fast_kernels.cli.main:main"
 dev = [
   "build>=1.3,<2",
   "mypy>=1.18,<2",
+  "pybind11>=3.0.0,<4",
   "pre-commit>=4.3,<5",
   "pytest>=9.0,<10",
   "pytest-cov>=7.0,<8",
@@ -63,7 +64,7 @@ sdist.include = [
   "tests",
 ]
 wheel.packages = ["src/fast_kernels"]
-cmake.args = ["-DFK_ENABLE_CUDA=OFF"]
+cmake.args = ["-DFK_ENABLE_CUDA=ON"]
 cmake.build-type = "Release"
 cmake.version = ">=4.2"
 

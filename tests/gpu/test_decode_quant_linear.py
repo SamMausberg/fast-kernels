@@ -7,6 +7,7 @@ import pytest
 from fast_kernels.native import native_build_info
 from fast_kernels.ops import (
     arc_w4a16_forward,
+    arc_w4a16_supported_impls,
     dequant_w4a16_to_fp16,
     pack_arc_w4a16_packets,
 )
@@ -36,6 +37,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _explicit_impls() -> list[str]:
+    if not _cuda_ready():
+        return ["scalar"]
+    return [impl for impl in arc_w4a16_supported_impls(torch.device("cuda")) if impl != "auto"]
+
+
 def _explicit_reference_output(
     activations: Any,
     q_u8: Any,
@@ -55,7 +62,12 @@ def _explicit_reference_output(
 
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("batch", [1, 4])
-def test_arc_kernel_matches_explicit_reference(group_size: int, batch: int) -> None:
+@pytest.mark.parametrize("impl", [None, *_explicit_impls()])
+def test_arc_kernel_matches_explicit_reference(
+    group_size: int,
+    batch: int,
+    impl: str | None,
+) -> None:
     torch.manual_seed(7 + batch + group_size)
     device = torch.device("cuda")
     n = 128
@@ -64,14 +76,59 @@ def test_arc_kernel_matches_explicit_reference(group_size: int, batch: int) -> N
 
     activations = torch.randn((batch, k), device=device, dtype=torch.float16).contiguous()
     q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8).contiguous()
-    alpha = (
-        0.05 + (0.1 * torch.rand((n, num_groups), device=device, dtype=torch.float32))
-    ).to(torch.float16)
+    alpha = (0.05 + (0.1 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
     zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
     beta = -(alpha * zero_points.to(dtype=torch.float16))
 
     packets = pack_arc_w4a16_packets(q_u8, alpha, beta, group_size=group_size)
-    kernel_output = arc_w4a16_forward(activations, packets, n=n, k=k, group_size=group_size)
+    kernel_output = arc_w4a16_forward(
+        activations,
+        packets,
+        n=n,
+        k=k,
+        group_size=group_size,
+        impl=impl,
+    )
+    reference_output = _explicit_reference_output(
+        activations,
+        q_u8,
+        alpha,
+        beta,
+        group_size=group_size,
+    )
+
+    torch.testing.assert_close(kernel_output, reference_output, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.parametrize("batch", [8, 16])
+def test_arc_scalar_direct_matches_reference(group_size: int, batch: int) -> None:
+    torch.manual_seed(90 + batch + group_size)
+    device = torch.device("cuda")
+    n = 4096
+    k = group_size * 4
+    num_groups = k // group_size
+
+    activations = torch.randn((batch, k), device=device, dtype=torch.float16).contiguous()
+    q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8).contiguous()
+    alpha = (0.03 + (0.12 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
+    zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
+    beta = -(alpha * zero_points.to(dtype=torch.float16))
+
+    packets = pack_arc_w4a16_packets(q_u8, alpha, beta, group_size=group_size)
+    kernel_output = arc_w4a16_forward(
+        activations,
+        packets,
+        n=n,
+        k=k,
+        group_size=group_size,
+        split_k_slices=1,
+        impl="scalar",
+    )
     reference_output = _explicit_reference_output(
         activations,
         q_u8,
@@ -92,9 +149,9 @@ def test_native_dequant_matches_explicit_reference(group_size: int) -> None:
     num_groups = k // group_size
 
     q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8).contiguous()
-    alpha = (
-        0.03 + (0.2 * torch.rand((n, num_groups), device=device, dtype=torch.float32))
-    ).to(torch.float16)
+    alpha = (0.03 + (0.2 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
     zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
     beta = -(alpha * zero_points.to(dtype=torch.float16))
 
@@ -122,9 +179,9 @@ def test_arc_split_k_override_matches_explicit_reference() -> None:
 
     activations = torch.randn((batch, k), device=device, dtype=torch.float16).contiguous()
     q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8).contiguous()
-    alpha = (
-        0.04 + (0.12 * torch.rand((n, num_groups), device=device, dtype=torch.float32))
-    ).to(torch.float16)
+    alpha = (0.04 + (0.12 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
     zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
     beta = -(alpha * zero_points.to(dtype=torch.float16))
     packets = pack_arc_w4a16_packets(q_u8, alpha, beta, group_size=group_size)
@@ -150,6 +207,44 @@ def test_arc_split_k_override_matches_explicit_reference() -> None:
     torch.testing.assert_close(kernel_output, reference_output, atol=1e-2, rtol=1e-2)
 
 
+def test_arc_impl_env_override_matches_explicit_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    torch.manual_seed(5150)
+    device = torch.device("cuda")
+    group_size = 128
+    batch = 4
+    n = 128
+    k = group_size * 4
+    num_groups = k // group_size
+
+    activations = torch.randn((batch, k), device=device, dtype=torch.float16).contiguous()
+    q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8).contiguous()
+    alpha = (0.04 + (0.12 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
+    zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
+    beta = -(alpha * zero_points.to(dtype=torch.float16))
+    packets = pack_arc_w4a16_packets(q_u8, alpha, beta, group_size=group_size)
+
+    forced_impl = "wgmma" if "wgmma" in _explicit_impls() else _explicit_impls()[0]
+    monkeypatch.setenv("FK_ARC_W4A16_IMPL", forced_impl)
+    kernel_output = arc_w4a16_forward(
+        activations,
+        packets,
+        n=n,
+        k=k,
+        group_size=group_size,
+    )
+    reference_output = _explicit_reference_output(
+        activations,
+        q_u8,
+        alpha,
+        beta,
+        group_size=group_size,
+    )
+
+    torch.testing.assert_close(kernel_output, reference_output, atol=1e-2, rtol=1e-2)
+
+
 def test_arc_kernel_respects_current_stream() -> None:
     torch.manual_seed(2112)
     device = torch.device("cuda")
@@ -161,9 +256,9 @@ def test_arc_kernel_respects_current_stream() -> None:
     expected_activations = torch.randn((1, k), device=device, dtype=torch.float16).contiguous()
     activations = torch.zeros((1, k), device=device, dtype=torch.float16)
     q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8).contiguous()
-    alpha = (
-        0.05 + (0.1 * torch.rand((n, num_groups), device=device, dtype=torch.float32))
-    ).to(torch.float16)
+    alpha = (0.05 + (0.1 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
     zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
     beta = -(alpha * zero_points.to(dtype=torch.float16))
     packets = pack_arc_w4a16_packets(q_u8, alpha, beta, group_size=group_size)

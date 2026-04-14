@@ -7,20 +7,39 @@ project(
   LANGUAGES CXX
 )
 
-option(FK_ENABLE_CUDA "Build CUDA sources and link against the CUDA runtime." OFF)
+option(FK_ENABLE_CUDA "Build CUDA sources and link against the CUDA runtime." ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 CONFIG REQUIRED)
+find_package(pybind11 CONFIG QUIET)
+if(NOT pybind11_FOUND)
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} -m pybind11 --cmakedir
+    OUTPUT_VARIABLE FK_PYBIND11_CMAKE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE FK_PYBIND11_STATUS
+    ERROR_QUIET
+  )
+  if(FK_PYBIND11_STATUS EQUAL 0)
+    set(pybind11_DIR "${FK_PYBIND11_CMAKE_DIR}" CACHE PATH "pybind11 CMake package directory")
+  endif()
+  find_package(pybind11 CONFIG REQUIRED)
+endif()
 
 if(FK_ENABLE_CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR "${CMAKE_CUDA_ARCHITECTURES}" STREQUAL "")
+    set(CMAKE_CUDA_ARCHITECTURES native CACHE STRING "CUDA architectures" FORCE)
+  endif()
   enable_language(CUDA)
   set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   find_package(CUDAToolkit REQUIRED)
+  string(REPLACE ";" "," FK_CUDA_ARCHITECTURES_STR "${CMAKE_CUDA_ARCHITECTURES}")
+else()
+  set(FK_CUDA_ARCHITECTURES_STR "")
 endif()
 
 pybind11_add_module(
@@ -38,6 +57,7 @@ target_compile_definitions(
     FK_PROJECT_VERSION="${PROJECT_VERSION}"
     FK_CXX_COMPILER_ID="${CMAKE_CXX_COMPILER_ID}"
     FK_CXX_COMPILER_VERSION="${CMAKE_CXX_COMPILER_VERSION}"
+    FK_CUDA_ARCHITECTURES="${FK_CUDA_ARCHITECTURES_STR}"
 )
 
 if(FK_ENABLE_CUDA)

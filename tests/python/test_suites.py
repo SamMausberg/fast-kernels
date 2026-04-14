@@ -18,7 +18,12 @@ def test_template_suite_verifies() -> None:
 def test_decode_linear_suite_loads() -> None:
     suite = load_suite(Path("benchmarks/suites/decode_linear_w4a16.toml"))
     assert suite.id == "decode_linear_w4a16"
-    assert suite.kernels.ids == ["decode/w4a16_linear"]
+    assert suite.kernels.ids == [
+        "decode/w4a16_linear",
+        "decode/w4a16_linear_scalar",
+        "decode/w4a16_linear_tc",
+        "decode/w4a16_linear_wgmma",
+    ]
     assert "torch/reference_w4a16_linear" in suite.baselines.ids
     assert "groupwise_64" in suite.layouts
     assert len(suite.shapes) == 12

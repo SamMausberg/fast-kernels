@@ -18,6 +18,14 @@
     {
       "name": "dev",
       "inherits": "base",
+      "displayName": "CUDA native build",
+      "cacheVariables": {
+        "FK_ENABLE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "cpu-only",
+      "inherits": "base",
       "displayName": "CPU-only native build",
       "cacheVariables": {
         "FK_ENABLE_CUDA": "OFF"
@@ -38,9 +46,12 @@
       "configurePreset": "dev"
     },
     {
+      "name": "cpu-only",
+      "configurePreset": "cpu-only"
+    },
+    {
       "name": "cuda-release",
       "configurePreset": "cuda-release"
     }
   ]
 }
-

@@ -216,6 +216,7 @@ dev = [
     { name = "build" },
     { name = "mypy" },
     { name = "pre-commit" },
+    { name = "pybind11" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -235,6 +236,7 @@ dev = [
     { name = "build", specifier = ">=1.3,<2" },
     { name = "mypy", specifier = ">=1.18,<2" },
     { name = "pre-commit", specifier = ">=4.3,<5" },
+    { name = "pybind11", specifier = ">=3.0.0,<4" },
     { name = "pytest", specifier = ">=9.0,<10" },
     { name = "pytest-cov", specifier = ">=7.0,<8" },
     { name = "ruff", specifier = ">=0.14,<0.15" },
@@ -766,6 +768,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/40/f1/6d86a29246dfd2e9b6237f0b5823717f60cad94d47ddc26afa916d21f525/pre_commit-4.5.1.tar.gz", hash = "sha256:eb545fcff725875197837263e977ea257a402056661f09dae08e4b149b030a61", size = 198232, upload-time = "2025-12-16T21:14:33.552Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5d/19/fd3ef348460c80af7bb4669ea7926651d1f95c23ff2df18b9d24bab4f3fa/pre_commit-4.5.1-py2.py3-none-any.whl", hash = "sha256:3b3afd891e97337708c1674210f8eba659b52a38ea5f822ff142d10786221f77", size = 226437, upload-time = "2025-12-16T21:14:32.409Z" },
+]
+
+[[package]]
+name = "pybind11"
+version = "3.0.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/41/50/b83d65efc1914681f5aded4ce37c703408a9bb74829f27f041560ca52ffb/pybind11-3.0.3.tar.gz", hash = "sha256:00471cdb816882c484708bc5dde80815c8c11cea540ab2cc6410f5ddea434755", size = 587814, upload-time = "2026-03-31T23:42:06.481Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/87/99f21e9b20899d6dc1bf7544cfe53e5fa17acc21bb267971a540425357d3/pybind11-3.0.3-py3-none-any.whl", hash = "sha256:fb5f8e4a64946b4dcc0451c83a8c384f803bc0a62dd1ba02f199e97dbc9aad4c", size = 313717, upload-time = "2026-03-31T23:42:04.814Z" },
 ]
 
 [[package]]

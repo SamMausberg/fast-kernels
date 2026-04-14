@@ -8,7 +8,12 @@ dtypes = ["fp16"]
 layouts = ["groupwise_64", "groupwise_128"]
 
 [kernels]
-ids = ["decode/w4a16_linear"]
+ids = [
+  "decode/w4a16_linear",
+  "decode/w4a16_linear_scalar",
+  "decode/w4a16_linear_tc",
+  "decode/w4a16_linear_wgmma",
+]
 
 [baselines]
 ids = ["torch/reference_w4a16_linear", "vendor/cublaslt_fp16_after_dequant"]

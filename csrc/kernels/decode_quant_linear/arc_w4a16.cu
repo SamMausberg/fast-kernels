@@ -15,24 +15,32 @@ namespace {
 
 constexpr int kColumnsPerTile = 128;
 constexpr int kThreadCount = 128;
+constexpr int kReductionThreads = 256;
 static_assert(kColumnsPerTile == kThreadCount, "ARC uses one thread per output column");
 
 int expected_packet_stride_bytes(int group_size) {
   return (kColumnsPerTile * (group_size / 2)) + (2 * kColumnsPerTile * static_cast<int>(sizeof(__half)));
 }
 
-void validate_dimensions(int batch, int n, int k, int group_size) {
-  if (batch <= 0 || n <= 0 || k <= 0) {
-    throw std::invalid_argument("batch, n, and k must be positive");
+void validate_group_size_and_k(int batch, int k, int group_size) {
+  if (batch <= 0 || k <= 0) {
+    throw std::invalid_argument("batch and k must be positive");
   }
   if (group_size != 64 && group_size != 128) {
     throw std::invalid_argument("group_size must be 64 or 128");
   }
-  if (n % kColumnsPerTile != 0) {
-    throw std::invalid_argument("n must be a multiple of 128");
-  }
   if (k % group_size != 0) {
     throw std::invalid_argument("k must be divisible by group_size");
+  }
+}
+
+void validate_dimensions(int batch, int n, int k, int group_size) {
+  validate_group_size_and_k(batch, k, group_size);
+  if (n <= 0) {
+    throw std::invalid_argument("n must be positive");
+  }
+  if (n % kColumnsPerTile != 0) {
+    throw std::invalid_argument("n must be a multiple of 128");
   }
 }
 
@@ -84,6 +92,7 @@ __global__ void pack_arc_packets_kernel(
     int packet_stride_bytes
 ) {
   constexpr int kGroupBytes = GROUP_SIZE / 2;
+  constexpr int kPackedWords = kGroupBytes / 4;
   constexpr int kQTileBytes = kColumnsPerTile * kGroupBytes;
 
   const int n_tile = static_cast<int>(blockIdx.x);
@@ -91,21 +100,64 @@ __global__ void pack_arc_packets_kernel(
   const int row_start = n_tile * kColumnsPerTile;
   const int q_row_stride = k / 2;
   std::uint8_t* packet = packets + ((n_tile * num_groups + group_idx) * packet_stride_bytes);
+  auto* packet_words = reinterpret_cast<std::uint32_t*>(packet);
 
-  for (int idx = static_cast<int>(threadIdx.x); idx < kQTileBytes; idx += static_cast<int>(blockDim.x)) {
-    const int row = idx / kGroupBytes;
-    const int byte_in_group = idx % kGroupBytes;
-    packet[idx] = q[((row_start + row) * q_row_stride) + (group_idx * kGroupBytes) + byte_in_group];
+  const int lane = static_cast<int>(threadIdx.x);
+  const std::uint8_t* q_row = q + ((row_start + lane) * q_row_stride) + (group_idx * kGroupBytes);
+  const auto* q_row_words = reinterpret_cast<const std::uint32_t*>(q_row);
+
+#pragma unroll
+  for (int word_idx = 0; word_idx < kPackedWords; ++word_idx) {
+    packet_words[(word_idx * kColumnsPerTile) + lane] = q_row_words[word_idx];
   }
 
   // Each packet is laid out as:
-  //   [ 128 rows of packed q bytes ][ 128 alpha values ][ 128 beta values ]
-  // in the exact order the compute CTA consumes them.
+  //   [ packed q words in word-major order across 128 output columns ]
+  //   [ 128 alpha values ]
+  //   [ 128 beta values ]
+  // so a fixed word_idx becomes one contiguous block across the CTA.
   __half* alpha_dst = reinterpret_cast<__half*>(packet + kQTileBytes);
   __half* beta_dst = reinterpret_cast<__half*>(packet + kQTileBytes + (kColumnsPerTile * static_cast<int>(sizeof(__half))));
-  for (int idx = static_cast<int>(threadIdx.x); idx < kColumnsPerTile; idx += static_cast<int>(blockDim.x)) {
-    alpha_dst[idx] = alpha[((row_start + idx) * num_groups) + group_idx];
-    beta_dst[idx] = beta[((row_start + idx) * num_groups) + group_idx];
+  alpha_dst[lane] = alpha[((row_start + lane) * num_groups) + group_idx];
+  beta_dst[lane] = beta[((row_start + lane) * num_groups) + group_idx];
+}
+
+template <int GROUP_SIZE>
+__global__ void compute_arc_group_sums_kernel(
+    const __half* __restrict__ activations,
+    float* __restrict__ group_sums,
+    int batch,
+    int k,
+    int num_groups
+) {
+  __shared__ float reduction[kThreadCount];
+
+  const int batch_row = static_cast<int>(blockIdx.x);
+  const int group_idx = static_cast<int>(blockIdx.y);
+  if (batch_row >= batch || group_idx >= num_groups) {
+    return;
+  }
+
+  float partial = 0.0f;
+  const __half2* activation_pairs =
+      reinterpret_cast<const __half2*>(activations + (batch_row * k) + (group_idx * GROUP_SIZE));
+  for (int pair_idx = static_cast<int>(threadIdx.x); pair_idx < (GROUP_SIZE / 2); pair_idx += kThreadCount) {
+    const float2 a_pair = __half22float2(activation_pairs[pair_idx]);
+    partial += a_pair.x + a_pair.y;
+  }
+
+  reduction[threadIdx.x] = partial;
+  __syncthreads();
+
+  for (int stride = kThreadCount / 2; stride > 0; stride >>= 1) {
+    if (static_cast<int>(threadIdx.x) < stride) {
+      reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    group_sums[(batch_row * num_groups) + group_idx] = reduction[0];
   }
 }
 
@@ -136,10 +188,54 @@ __global__ void dequant_w4a16_kernel(
   output[idx] = __float2half_rn((alpha_value * static_cast<float>(q_value)) + beta_value);
 }
 
+template <int GROUP_SIZE>
+__global__ void dequant_arc_packets_kernel(
+    const std::uint8_t* __restrict__ packets,
+    __half* __restrict__ output,
+    int n,
+    int k,
+    int num_groups,
+    int packet_stride_bytes
+) {
+  constexpr int kGroupBytes = GROUP_SIZE / 2;
+  constexpr int kPackedWords = kGroupBytes / 4;
+  constexpr int kQTileBytes = kColumnsPerTile * kGroupBytes;
+
+  const int idx = (static_cast<int>(blockIdx.x) * static_cast<int>(blockDim.x)) + static_cast<int>(threadIdx.x);
+  const int total = n * k;
+  if (idx >= total) {
+    return;
+  }
+
+  const int row = idx / k;
+  const int col = idx % k;
+  const int lane = row % kColumnsPerTile;
+  const int n_tile = row / kColumnsPerTile;
+  const int group_idx = col / GROUP_SIZE;
+  const int pair_idx = (col % GROUP_SIZE) / 2;
+  const int word_idx = pair_idx / 4;
+  const int byte_offset = pair_idx % 4;
+
+  const std::uint8_t* packet = packets + (((n_tile * num_groups) + group_idx) * packet_stride_bytes);
+  const auto* packet_words = reinterpret_cast<const std::uint32_t*>(packet);
+  const std::uint32_t packed_word = packet_words[(word_idx * kColumnsPerTile) + lane];
+  const std::uint8_t packed =
+      static_cast<std::uint8_t>((packed_word >> (byte_offset * 8)) & 0xffU);
+  const int q_value = (col & 1) == 0 ? (packed & 0x0f) : (packed >> 4);
+
+  const __half* alpha = reinterpret_cast<const __half*>(packet + kQTileBytes);
+  const __half* beta =
+      reinterpret_cast<const __half*>(packet + kQTileBytes + (kColumnsPerTile * static_cast<int>(sizeof(__half))));
+  const float alpha_value = __half2float(alpha[lane]);
+  const float beta_value = __half2float(beta[lane]);
+  output[idx] = __float2half_rn((alpha_value * static_cast<float>(q_value)) + beta_value);
+}
+
 template <int GROUP_SIZE, int M_TILE>
 __device__ void accumulate_arc_group_range(
     const __half* __restrict__ activations,
     const std::uint8_t* __restrict__ packets,
+    const float* __restrict__ group_sums,
     int row_start,
     int active_rows,
     int k,
@@ -147,74 +243,78 @@ __device__ void accumulate_arc_group_range(
     int group_end,
     int num_groups,
     int packet_stride_bytes,
-    __half2 shared_activation_pairs[M_TILE][GROUP_SIZE / 2],
-    float shared_sums[M_TILE],
+    float2 shared_activation_pairs[M_TILE][GROUP_SIZE / 2],
+    float shared_group_sums[M_TILE],
+    std::uint32_t shared_q_words[GROUP_SIZE / 8][kColumnsPerTile],
     float2 q_pair_lut[256],
     float accumulators[M_TILE]
 ) {
   constexpr int kGroupBytes = GROUP_SIZE / 2;
-  constexpr int kQTileBytes = kColumnsPerTile * kGroupBytes;
   constexpr int kPackedWords = kGroupBytes / 4;
+  constexpr int kQTileBytes = kColumnsPerTile * kGroupBytes;
+  const int lane = static_cast<int>(threadIdx.x);
 
   for (int group_idx = group_begin; group_idx < group_end; ++group_idx) {
-    // Stage one activation group as half2 pairs so the inner loop consumes
-    // packed q bytes against vectorized activation loads.
-    for (int linear = static_cast<int>(threadIdx.x); linear < active_rows * kGroupBytes;
-         linear += static_cast<int>(blockDim.x)) {
+    for (int linear = lane; linear < active_rows * kGroupBytes; linear += kThreadCount) {
       const int row = linear / kGroupBytes;
       const int pair_idx = linear % kGroupBytes;
       const int batch_row = row_start + row;
       const __half2* activation_pairs =
           reinterpret_cast<const __half2*>(activations + (batch_row * k) + (group_idx * GROUP_SIZE));
-      shared_activation_pairs[row][pair_idx] = activation_pairs[pair_idx];
+      shared_activation_pairs[row][pair_idx] = __half22float2(activation_pairs[pair_idx]);
     }
-    __syncthreads();
-
-    if (static_cast<int>(threadIdx.x) < active_rows) {
-      float sum = 0.0f;
-      for (int pair_idx = 0; pair_idx < kGroupBytes; ++pair_idx) {
-        const float2 a_pair = __half22float2(shared_activation_pairs[threadIdx.x][pair_idx]);
-        sum += a_pair.x + a_pair.y;
-      }
-      shared_sums[threadIdx.x] = sum;
+    if (lane < active_rows) {
+      shared_group_sums[lane] = group_sums[((row_start + lane) * num_groups) + group_idx];
     }
-    __syncthreads();
 
     const std::uint8_t* packet = packets + (((static_cast<int>(blockIdx.x) * num_groups) + group_idx) * packet_stride_bytes);
-    const std::uint8_t* q_tile = packet;
+    const auto* packet_words = reinterpret_cast<const std::uint32_t*>(packet);
+#pragma unroll
+    for (int word_idx = 0; word_idx < kPackedWords; ++word_idx) {
+      shared_q_words[word_idx][lane] = packet_words[(word_idx * kColumnsPerTile) + lane];
+    }
+    __syncthreads();
+
     const __half* alpha = reinterpret_cast<const __half*>(packet + kQTileBytes);
     const __half* beta =
         reinterpret_cast<const __half*>(packet + kQTileBytes + (kColumnsPerTile * static_cast<int>(sizeof(__half))));
-    const float alpha_value = __half2float(alpha[threadIdx.x]);
-    const float beta_value = __half2float(beta[threadIdx.x]);
-    const std::uint8_t* q_row = q_tile + (threadIdx.x * kGroupBytes);
-    const std::uint32_t* q_row_words = reinterpret_cast<const std::uint32_t*>(q_row);
+    const float alpha_value = __half2float(alpha[lane]);
+    const float beta_value = __half2float(beta[lane]);
+
+#pragma unroll
+    for (int word_idx = 0; word_idx < kPackedWords; ++word_idx) {
+      const std::uint32_t packed_word = shared_q_words[word_idx][lane];
+      float2 scaled_q_pairs[4];
+
+#pragma unroll
+      for (int byte_offset = 0; byte_offset < 4; ++byte_offset) {
+        const std::uint8_t packed = static_cast<std::uint8_t>((packed_word >> (byte_offset * 8)) & 0xffU);
+        const float2 q_pair = q_pair_lut[packed];
+        scaled_q_pairs[byte_offset] = make_float2(alpha_value * q_pair.x, alpha_value * q_pair.y);
+      }
+
+#pragma unroll
+      for (int row = 0; row < M_TILE; ++row) {
+        if (row >= active_rows) {
+          continue;
+        }
+
+#pragma unroll
+        for (int byte_offset = 0; byte_offset < 4; ++byte_offset) {
+          const int packed_idx = (word_idx * 4) + byte_offset;
+          const float2 a_pair = shared_activation_pairs[row][packed_idx];
+          accumulators[row] = fmaf(scaled_q_pairs[byte_offset].x, a_pair.x, accumulators[row]);
+          accumulators[row] = fmaf(scaled_q_pairs[byte_offset].y, a_pair.y, accumulators[row]);
+        }
+      }
+    }
 
 #pragma unroll
     for (int row = 0; row < M_TILE; ++row) {
       if (row >= active_rows) {
         continue;
       }
-
-      // ARC's hot path is a q-dot-product. The affine offset is applied separately
-      // as beta * sum(a_group), which is the exact groupwise rank-1 correction.
-      float partial = 0.0f;
-#pragma unroll
-      for (int word_idx = 0; word_idx < kPackedWords; ++word_idx) {
-        const std::uint32_t packed_word = q_row_words[word_idx];
-
-#pragma unroll
-        for (int byte_offset = 0; byte_offset < 4; ++byte_offset) {
-          const int packed_idx = (word_idx * 4) + byte_offset;
-          const std::uint8_t packed = static_cast<std::uint8_t>((packed_word >> (byte_offset * 8)) & 0xffU);
-          const float2 q_pair = q_pair_lut[packed];
-          const float2 a_pair = __half22float2(shared_activation_pairs[row][packed_idx]);
-          partial = fmaf(q_pair.x, a_pair.x, partial);
-          partial = fmaf(q_pair.y, a_pair.y, partial);
-        }
-      }
-
-      accumulators[row] += (alpha_value * partial) + (beta_value * shared_sums[row]);
+      accumulators[row] += beta_value * shared_group_sums[row];
     }
     __syncthreads();
   }
@@ -224,6 +324,7 @@ template <int GROUP_SIZE, int M_TILE>
 __global__ void arc_w4a16_kernel(
     const __half* __restrict__ activations,
     const std::uint8_t* __restrict__ packets,
+    const float* __restrict__ group_sums,
     __half* __restrict__ output,
     int batch,
     int n,
@@ -231,13 +332,12 @@ __global__ void arc_w4a16_kernel(
     int num_groups,
     int packet_stride_bytes
 ) {
-  __shared__ __half2 shared_activation_pairs[M_TILE][GROUP_SIZE / 2];
-  __shared__ float shared_sums[M_TILE];
+  __shared__ float2 shared_activation_pairs[M_TILE][GROUP_SIZE / 2];
+  __shared__ float shared_group_sums[M_TILE];
+  __shared__ std::uint32_t shared_q_words[GROUP_SIZE / 8][kColumnsPerTile];
   __shared__ float2 q_pair_lut[256];
 
-  // Each packed byte holds two 4-bit q values. The LUT turns that byte into the
-  // corresponding (low_nibble, high_nibble) pair once per CTA instead of once per dot.
-  for (int idx = static_cast<int>(threadIdx.x); idx < 256; idx += static_cast<int>(blockDim.x)) {
+  for (int idx = static_cast<int>(threadIdx.x); idx < 256; idx += kThreadCount) {
     q_pair_lut[idx] = make_float2(
         static_cast<float>(idx & 0x0f),
         static_cast<float>((idx >> 4) & 0x0f));
@@ -264,6 +364,7 @@ __global__ void arc_w4a16_kernel(
   accumulate_arc_group_range<GROUP_SIZE, M_TILE>(
       activations,
       packets,
+      group_sums,
       row_start,
       active_rows,
       k,
@@ -272,7 +373,8 @@ __global__ void arc_w4a16_kernel(
       num_groups,
       packet_stride_bytes,
       shared_activation_pairs,
-      shared_sums,
+      shared_group_sums,
+      shared_q_words,
       q_pair_lut,
       accumulators);
 
@@ -289,6 +391,7 @@ template <int GROUP_SIZE, int M_TILE>
 __global__ void arc_w4a16_split_k_kernel(
     const __half* __restrict__ activations,
     const std::uint8_t* __restrict__ packets,
+    const float* __restrict__ group_sums,
     float* __restrict__ partials,
     int batch,
     int n,
@@ -297,13 +400,12 @@ __global__ void arc_w4a16_split_k_kernel(
     int packet_stride_bytes,
     int groups_per_slice
 ) {
-  __shared__ __half2 shared_activation_pairs[M_TILE][GROUP_SIZE / 2];
-  __shared__ float shared_sums[M_TILE];
+  __shared__ float2 shared_activation_pairs[M_TILE][GROUP_SIZE / 2];
+  __shared__ float shared_group_sums[M_TILE];
+  __shared__ std::uint32_t shared_q_words[GROUP_SIZE / 8][kColumnsPerTile];
   __shared__ float2 q_pair_lut[256];
 
-  // Same byte-to-q-pair decode used by the direct kernel. Split-K changes the
-  // group range each CTA owns, but it does not change the packet math inside a group.
-  for (int idx = static_cast<int>(threadIdx.x); idx < 256; idx += static_cast<int>(blockDim.x)) {
+  for (int idx = static_cast<int>(threadIdx.x); idx < 256; idx += kThreadCount) {
     q_pair_lut[idx] = make_float2(
         static_cast<float>(idx & 0x0f),
         static_cast<float>((idx >> 4) & 0x0f));
@@ -334,11 +436,10 @@ __global__ void arc_w4a16_split_k_kernel(
     accumulators[row] = 0.0f;
   }
 
-  // Split-K is only used for skinny-N decode cases where the direct column grid
-  // under-fills the GPU. Extra K slices create enough independent CTAs to hide latency.
   accumulate_arc_group_range<GROUP_SIZE, M_TILE>(
       activations,
       packets,
+      group_sums,
       row_start,
       active_rows,
       k,
@@ -347,7 +448,8 @@ __global__ void arc_w4a16_split_k_kernel(
       num_groups,
       packet_stride_bytes,
       shared_activation_pairs,
-      shared_sums,
+      shared_group_sums,
+      shared_q_words,
       q_pair_lut,
       accumulators);
 
@@ -399,6 +501,21 @@ void launch_packet_builder(
 }
 
 template <int GROUP_SIZE>
+void launch_group_sums_kernel(
+    const __half* activations,
+    float* group_sums,
+    int batch,
+    int k,
+    int num_groups,
+    cudaStream_t stream
+) {
+  const dim3 grid(static_cast<unsigned int>(batch), static_cast<unsigned int>(num_groups), 1U);
+  compute_arc_group_sums_kernel<GROUP_SIZE><<<grid, kThreadCount, 0, stream>>>(
+      activations, group_sums, batch, k, num_groups);
+  FK_CUDA_CHECK(cudaGetLastError());
+}
+
+template <int GROUP_SIZE>
 void launch_dequant_kernel(
     const std::uint8_t* q,
     const __half* alpha,
@@ -409,10 +526,26 @@ void launch_dequant_kernel(
     int num_groups,
     cudaStream_t stream
 ) {
-  constexpr int kDequantThreads = 256;
   const int total = n * k;
-  const int blocks = (total + kDequantThreads - 1) / kDequantThreads;
-  dequant_w4a16_kernel<GROUP_SIZE><<<blocks, kDequantThreads, 0, stream>>>(q, alpha, beta, output, n, k, num_groups);
+  const int blocks = (total + kReductionThreads - 1) / kReductionThreads;
+  dequant_w4a16_kernel<GROUP_SIZE><<<blocks, kReductionThreads, 0, stream>>>(q, alpha, beta, output, n, k, num_groups);
+  FK_CUDA_CHECK(cudaGetLastError());
+}
+
+template <int GROUP_SIZE>
+void launch_dequant_packet_kernel(
+    const std::uint8_t* packets,
+    __half* output,
+    int n,
+    int k,
+    int num_groups,
+    int packet_stride_bytes,
+    cudaStream_t stream
+) {
+  const int total = n * k;
+  const int blocks = (total + kReductionThreads - 1) / kReductionThreads;
+  dequant_arc_packets_kernel<GROUP_SIZE><<<blocks, kReductionThreads, 0, stream>>>(
+      packets, output, n, k, num_groups, packet_stride_bytes);
   FK_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -420,6 +553,7 @@ template <int GROUP_SIZE, int M_TILE>
 void launch_arc_kernel(
     const __half* activations,
     const std::uint8_t* packets,
+    const float* group_sums,
     __half* output,
     int batch,
     int n,
@@ -433,7 +567,15 @@ void launch_arc_kernel(
       static_cast<unsigned int>((batch + M_TILE - 1) / M_TILE),
       1U);
   arc_w4a16_kernel<GROUP_SIZE, M_TILE><<<grid, kThreadCount, 0, stream>>>(
-      activations, packets, output, batch, n, k, num_groups, packet_stride_bytes);
+      activations,
+      packets,
+      group_sums,
+      output,
+      batch,
+      n,
+      k,
+      num_groups,
+      packet_stride_bytes);
   FK_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -441,6 +583,7 @@ template <int GROUP_SIZE>
 void launch_arc_split_k_kernel(
     const __half* activations,
     const std::uint8_t* packets,
+    const float* group_sums,
     float* partials,
     int batch,
     int n,
@@ -457,7 +600,7 @@ void launch_arc_split_k_kernel(
         static_cast<unsigned int>(batch),
         static_cast<unsigned int>(split_k_slices));
     arc_w4a16_split_k_kernel<GROUP_SIZE, 1><<<grid, kThreadCount, 0, stream>>>(
-        activations, packets, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
+        activations, packets, group_sums, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
     FK_CUDA_CHECK(cudaGetLastError());
     return;
   }
@@ -467,7 +610,7 @@ void launch_arc_split_k_kernel(
         static_cast<unsigned int>((batch + 1) / 2),
         static_cast<unsigned int>(split_k_slices));
     arc_w4a16_split_k_kernel<GROUP_SIZE, 2><<<grid, kThreadCount, 0, stream>>>(
-        activations, packets, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
+        activations, packets, group_sums, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
     FK_CUDA_CHECK(cudaGetLastError());
     return;
   }
@@ -477,7 +620,7 @@ void launch_arc_split_k_kernel(
         static_cast<unsigned int>((batch + 3) / 4),
         static_cast<unsigned int>(split_k_slices));
     arc_w4a16_split_k_kernel<GROUP_SIZE, 4><<<grid, kThreadCount, 0, stream>>>(
-        activations, packets, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
+        activations, packets, group_sums, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
     FK_CUDA_CHECK(cudaGetLastError());
     return;
   }
@@ -487,7 +630,7 @@ void launch_arc_split_k_kernel(
       static_cast<unsigned int>((batch + 7) / 8),
       static_cast<unsigned int>(split_k_slices));
   arc_w4a16_split_k_kernel<GROUP_SIZE, 8><<<grid, kThreadCount, 0, stream>>>(
-      activations, packets, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
+      activations, packets, group_sums, partials, batch, n, k, num_groups, packet_stride_bytes, groups_per_slice);
   FK_CUDA_CHECK(cudaGetLastError());
 }
 
@@ -499,7 +642,6 @@ void launch_arc_split_k_reduction(
     int split_k_slices,
     cudaStream_t stream
 ) {
-  constexpr int kReductionThreads = 256;
   const int total = batch * n;
   const int blocks = (total + kReductionThreads - 1) / kReductionThreads;
   reduce_arc_w4a16_split_k_partials_kernel<<<blocks, kReductionThreads, 0, stream>>>(
@@ -511,6 +653,7 @@ template <int GROUP_SIZE>
 void dispatch_arc_kernel(
     const __half* activations,
     const std::uint8_t* packets,
+    const float* group_sums,
     __half* output,
     int batch,
     int n,
@@ -521,21 +664,21 @@ void dispatch_arc_kernel(
 ) {
   if (batch <= 1) {
     launch_arc_kernel<GROUP_SIZE, 1>(
-        activations, packets, output, batch, n, k, num_groups, packet_stride_bytes, stream);
+        activations, packets, group_sums, output, batch, n, k, num_groups, packet_stride_bytes, stream);
     return;
   }
   if (batch <= 2) {
     launch_arc_kernel<GROUP_SIZE, 2>(
-        activations, packets, output, batch, n, k, num_groups, packet_stride_bytes, stream);
+        activations, packets, group_sums, output, batch, n, k, num_groups, packet_stride_bytes, stream);
     return;
   }
   if (batch <= 4) {
     launch_arc_kernel<GROUP_SIZE, 4>(
-        activations, packets, output, batch, n, k, num_groups, packet_stride_bytes, stream);
+        activations, packets, group_sums, output, batch, n, k, num_groups, packet_stride_bytes, stream);
     return;
   }
   launch_arc_kernel<GROUP_SIZE, 8>(
-      activations, packets, output, batch, n, k, num_groups, packet_stride_bytes, stream);
+      activations, packets, group_sums, output, batch, n, k, num_groups, packet_stride_bytes, stream);
 }
 
 cublasLtHandle_t get_cublaslt_handle() {
@@ -684,9 +827,32 @@ void pack_arc_w4a16_packets(
   launch_packet_builder<128>(q, alpha, beta, packets, n, k, num_groups, packet_stride_bytes, stream);
 }
 
+void compute_arc_w4a16_group_sums(
+    std::uintptr_t activations_ptr,
+    std::uintptr_t sums_ptr,
+    int batch,
+    int k,
+    int group_size,
+    std::uintptr_t stream_ptr
+) {
+  validate_group_size_and_k(batch, k, group_size);
+
+  const int num_groups = k / group_size;
+  const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  auto* activations = reinterpret_cast<const __half*>(activations_ptr);
+  auto* group_sums = reinterpret_cast<float*>(sums_ptr);
+
+  if (group_size == 64) {
+    launch_group_sums_kernel<64>(activations, group_sums, batch, k, num_groups, stream);
+    return;
+  }
+  launch_group_sums_kernel<128>(activations, group_sums, batch, k, num_groups, stream);
+}
+
 void arc_w4a16_forward(
     std::uintptr_t activations_ptr,
     std::uintptr_t packets_ptr,
+    std::uintptr_t group_sums_ptr,
     std::uintptr_t output_ptr,
     int batch,
     int n,
@@ -702,20 +868,22 @@ void arc_w4a16_forward(
   const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   auto* activations = reinterpret_cast<const __half*>(activations_ptr);
   auto* packets = reinterpret_cast<const std::uint8_t*>(packets_ptr);
+  auto* group_sums = reinterpret_cast<const float*>(group_sums_ptr);
   auto* output = reinterpret_cast<__half*>(output_ptr);
 
   if (group_size == 64) {
     dispatch_arc_kernel<64>(
-        activations, packets, output, batch, n, k, num_groups, packet_stride_bytes, stream);
+        activations, packets, group_sums, output, batch, n, k, num_groups, packet_stride_bytes, stream);
     return;
   }
   dispatch_arc_kernel<128>(
-      activations, packets, output, batch, n, k, num_groups, packet_stride_bytes, stream);
+      activations, packets, group_sums, output, batch, n, k, num_groups, packet_stride_bytes, stream);
 }
 
 void arc_w4a16_forward_split_k(
     std::uintptr_t activations_ptr,
     std::uintptr_t packets_ptr,
+    std::uintptr_t group_sums_ptr,
     std::uintptr_t partials_ptr,
     int batch,
     int n,
@@ -739,12 +907,14 @@ void arc_w4a16_forward_split_k(
   const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   auto* activations = reinterpret_cast<const __half*>(activations_ptr);
   auto* packets = reinterpret_cast<const std::uint8_t*>(packets_ptr);
+  auto* group_sums = reinterpret_cast<const float*>(group_sums_ptr);
   auto* partials = reinterpret_cast<float*>(partials_ptr);
 
   if (group_size == 64) {
     launch_arc_split_k_kernel<64>(
         activations,
         packets,
+        group_sums,
         partials,
         batch,
         n,
@@ -758,6 +928,7 @@ void arc_w4a16_forward_split_k(
   launch_arc_split_k_kernel<128>(
       activations,
       packets,
+      group_sums,
       partials,
       batch,
       n,
@@ -816,6 +987,87 @@ void dequant_w4a16_to_fp16(
   launch_dequant_kernel<128>(q, alpha, beta, output, n, k, num_groups, stream);
 }
 
+void dequant_arc_w4a16_packets_to_fp16(
+    std::uintptr_t packets_ptr,
+    std::uintptr_t output_ptr,
+    int n,
+    int k,
+    int group_size,
+    int packet_stride_bytes,
+    std::uintptr_t stream_ptr
+) {
+  validate_dimensions(1, n, k, group_size);
+  validate_packet_stride(group_size, packet_stride_bytes);
+
+  const int num_groups = k / group_size;
+  const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+  auto* packets = reinterpret_cast<const std::uint8_t*>(packets_ptr);
+  auto* output = reinterpret_cast<__half*>(output_ptr);
+
+  if (group_size == 64) {
+    launch_dequant_packet_kernel<64>(packets, output, n, k, num_groups, packet_stride_bytes, stream);
+    return;
+  }
+  launch_dequant_packet_kernel<128>(packets, output, n, k, num_groups, packet_stride_bytes, stream);
+}
+
+void cublaslt_fp16_with_weight(
+    std::uintptr_t activations_ptr,
+    std::uintptr_t weight_ptr,
+    std::uintptr_t output_ptr,
+    std::uintptr_t workspace_ptr,
+    std::size_t workspace_bytes,
+    int batch,
+    int n,
+    int k,
+    std::uintptr_t stream_ptr
+) {
+  if (batch <= 0 || n <= 0 || k <= 0) {
+    throw std::invalid_argument("batch, n, and k must be positive");
+  }
+
+  run_cublaslt_matmul(
+      reinterpret_cast<const __half*>(activations_ptr),
+      reinterpret_cast<const __half*>(weight_ptr),
+      reinterpret_cast<__half*>(output_ptr),
+      reinterpret_cast<void*>(workspace_ptr),
+      workspace_bytes,
+      batch,
+      n,
+      k,
+      reinterpret_cast<cudaStream_t>(stream_ptr));
+}
+
+void cublaslt_fp16_after_packet_dequant(
+    std::uintptr_t activations_ptr,
+    std::uintptr_t packets_ptr,
+    std::uintptr_t output_ptr,
+    std::uintptr_t weight_ptr,
+    std::uintptr_t workspace_ptr,
+    std::size_t workspace_bytes,
+    int batch,
+    int n,
+    int k,
+    int group_size,
+    int packet_stride_bytes,
+    std::uintptr_t stream_ptr
+) {
+  validate_dimensions(batch, n, k, group_size);
+  validate_packet_stride(group_size, packet_stride_bytes);
+  dequant_arc_w4a16_packets_to_fp16(
+      packets_ptr, weight_ptr, n, k, group_size, packet_stride_bytes, stream_ptr);
+  cublaslt_fp16_with_weight(
+      activations_ptr,
+      weight_ptr,
+      output_ptr,
+      workspace_ptr,
+      workspace_bytes,
+      batch,
+      n,
+      k,
+      stream_ptr);
+}
+
 void cublaslt_fp16_after_dequant(
     std::uintptr_t activations_ptr,
     std::uintptr_t q_ptr,
@@ -832,18 +1084,17 @@ void cublaslt_fp16_after_dequant(
     std::uintptr_t stream_ptr
 ) {
   validate_dimensions(batch, n, k, group_size);
-  const auto stream = reinterpret_cast<cudaStream_t>(stream_ptr);
   dequant_w4a16_to_fp16(q_ptr, alpha_ptr, beta_ptr, weight_ptr, n, k, group_size, stream_ptr);
-  run_cublaslt_matmul(
-      reinterpret_cast<const __half*>(activations_ptr),
-      reinterpret_cast<const __half*>(weight_ptr),
-      reinterpret_cast<__half*>(output_ptr),
-      reinterpret_cast<void*>(workspace_ptr),
+  cublaslt_fp16_with_weight(
+      activations_ptr,
+      weight_ptr,
+      output_ptr,
+      workspace_ptr,
       workspace_bytes,
       batch,
       n,
       k,
-      stream);
+      stream_ptr);
 }
 
 }  // namespace fast_kernels::decode_quant_linear

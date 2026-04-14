@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from fast_kernels.native import native_build_info, native_module
@@ -8,8 +9,23 @@ if TYPE_CHECKING:  # pragma: no cover - imported only for static checking
     import torch
 
 
+_ARC_GROUP_SUMS_CACHE: dict[tuple[int, int, int], Any] = {}
 _ARC_SPLIT_K_PARTIALS_CACHE: dict[tuple[int, int, int, int], Any] = {}
+_ARC_WEIGHT_BUFFER_CACHE: dict[tuple[int, int, int], Any] = {}
+_ARC_WORKSPACE_CACHE: dict[tuple[int, int], Any] = {}
 _ARC_SPLIT_K_TUNING_CACHE: dict[tuple[int, int, int, int, int], int] = {}
+_ARC_IMPL_TUNING_CACHE: dict[tuple[int, int, int, int, int, int | None], str] = {}
+
+_ARC_IMPL_ENV = "FK_ARC_W4A16_IMPL"
+_ARC_IMPL_AUTO = "auto"
+_ARC_IMPL_SCALAR = "scalar"
+_ARC_IMPL_TC = "tc"
+_ARC_IMPL_WGMMA = "wgmma"
+_ARC_IMPLS = {_ARC_IMPL_AUTO, _ARC_IMPL_SCALAR, _ARC_IMPL_TC, _ARC_IMPL_WGMMA}
+_TC_MIN_CAPABILITY = (8, 0)
+_WGMMA_MIN_CAPABILITY = (9, 0)
+_TC_WORKSPACE_BYTES = 0
+_WGMMA_WORKSPACE_BYTES = 32 * 1024 * 1024
 
 
 LAYOUT_TO_GROUP_SIZE: dict[str, int] = {
@@ -83,6 +99,70 @@ def _current_stream_ptr(device: Any) -> int:
     return int(torch.cuda.current_stream(device=device).cuda_stream)
 
 
+def _device_index(device: Any) -> int:
+    return int(device.index or 0)
+
+
+def _cuda_capability(device: Any) -> tuple[int, int]:
+    torch = _require_torch()
+    return tuple(int(x) for x in torch.cuda.get_device_capability(device))
+
+
+def _capability_gte(actual: tuple[int, int], required: tuple[int, int]) -> bool:
+    return actual >= required
+
+
+def arc_w4a16_supported_impls(device: Any | None = None) -> tuple[str, ...]:
+    impls = [_ARC_IMPL_AUTO, _ARC_IMPL_SCALAR]
+    if not cuda_decode_available():
+        return tuple(impls)
+
+    torch = _require_torch()
+    if device is None:
+        device = torch.device("cuda")
+    capability = _cuda_capability(device)
+    if _capability_gte(capability, _TC_MIN_CAPABILITY):
+        impls.append(_ARC_IMPL_TC)
+    if _capability_gte(capability, _WGMMA_MIN_CAPABILITY):
+        impls.append(_ARC_IMPL_WGMMA)
+    return tuple(impls)
+
+
+def _resolve_arc_impl(device: Any, impl: str | None) -> str:
+    if impl is None:
+        impl = os.environ.get(_ARC_IMPL_ENV, _ARC_IMPL_AUTO)
+    normalized = impl.strip().lower()
+    if normalized not in _ARC_IMPLS:
+        raise ValueError(f"impl must be one of {sorted(_ARC_IMPLS)} or omitted; received {impl!r}")
+
+    supported = set(arc_w4a16_supported_impls(device))
+    if normalized != _ARC_IMPL_AUTO and normalized not in supported:
+        raise ValueError(
+            f"impl={normalized!r} is unsupported on device {device}; "
+            f"supported implementations are {sorted(supported)}"
+        )
+    return normalized
+
+
+def _group_sums_buffer(
+    *,
+    device: Any,
+    batch: int,
+    num_groups: int,
+) -> Any:
+    torch = _require_torch()
+    cache_key = (_device_index(device), batch, num_groups)
+    group_sums = _ARC_GROUP_SUMS_CACHE.get(cache_key)
+    if (
+        group_sums is None
+        or tuple(group_sums.shape) != (batch, num_groups)
+        or group_sums.device != device
+    ):
+        group_sums = torch.empty((batch, num_groups), device=device, dtype=torch.float32)
+        _ARC_GROUP_SUMS_CACHE[cache_key] = group_sums
+    return group_sums
+
+
 def _split_k_partials(
     *,
     device: Any,
@@ -91,7 +171,7 @@ def _split_k_partials(
     split_k_slices: int,
 ) -> Any:
     torch = _require_torch()
-    cache_key = (device.index or 0, split_k_slices, batch, n)
+    cache_key = (_device_index(device), split_k_slices, batch, n)
     partials = _ARC_SPLIT_K_PARTIALS_CACHE.get(cache_key)
     if (
         partials is None
@@ -103,10 +183,62 @@ def _split_k_partials(
     return partials
 
 
-def _arc_forward_direct(
+def _weight_buffer(
+    *,
+    device: Any,
+    n: int,
+    k: int,
+) -> Any:
+    torch = _require_torch()
+    cache_key = (_device_index(device), n, k)
+    weight = _ARC_WEIGHT_BUFFER_CACHE.get(cache_key)
+    if weight is None or tuple(weight.shape) != (n, k) or weight.device != device:
+        weight = torch.empty((n, k), device=device, dtype=torch.float16)
+        _ARC_WEIGHT_BUFFER_CACHE[cache_key] = weight
+    return weight
+
+
+def _vendor_workspace(
+    *,
+    device: Any,
+    workspace_bytes: int,
+) -> Any | None:
+    torch = _require_torch()
+    if workspace_bytes <= 0:
+        return None
+    cache_key = (_device_index(device), workspace_bytes)
+    workspace = _ARC_WORKSPACE_CACHE.get(cache_key)
+    if workspace is None or workspace.numel() != workspace_bytes or workspace.device != device:
+        workspace = torch.empty(workspace_bytes, device=device, dtype=torch.uint8)
+        _ARC_WORKSPACE_CACHE[cache_key] = workspace
+    return workspace
+
+
+def _compute_arc_group_sums(
+    native: Any,
+    activations: Any,
+    group_sums: Any,
+    *,
+    batch: int,
+    k: int,
+    group_size: int,
+    stream_ptr: int,
+) -> None:
+    native.compute_arc_w4a16_group_sums(
+        activations.data_ptr(),
+        group_sums.data_ptr(),
+        batch,
+        k,
+        group_size,
+        stream_ptr,
+    )
+
+
+def _arc_forward_scalar_direct(
     native: Any,
     activations: Any,
     packets: Any,
+    group_sums: Any,
     output: Any,
     *,
     batch: int,
@@ -119,6 +251,7 @@ def _arc_forward_direct(
     native.arc_w4a16_forward(
         activations.data_ptr(),
         packets.data_ptr(),
+        group_sums.data_ptr(),
         output.data_ptr(),
         batch,
         n,
@@ -129,10 +262,11 @@ def _arc_forward_direct(
     )
 
 
-def _arc_forward_split_k(
+def _arc_forward_scalar_split_k(
     native: Any,
     activations: Any,
     packets: Any,
+    group_sums: Any,
     output: Any,
     partials: Any,
     *,
@@ -147,6 +281,7 @@ def _arc_forward_split_k(
     native.arc_w4a16_forward_split_k(
         activations.data_ptr(),
         packets.data_ptr(),
+        group_sums.data_ptr(),
         partials.data_ptr(),
         batch,
         n,
@@ -162,6 +297,47 @@ def _arc_forward_split_k(
         batch,
         n,
         split_k_slices,
+        stream_ptr,
+    )
+
+
+def _vendor_workspace_bytes_for_impl(impl: str) -> int:
+    if impl == _ARC_IMPL_TC:
+        return _TC_WORKSPACE_BYTES
+    if impl == _ARC_IMPL_WGMMA:
+        return _WGMMA_WORKSPACE_BYTES
+    raise ValueError(f"workspace bytes are undefined for impl={impl!r}")
+
+
+def _arc_forward_vendor_from_packets(
+    native: Any,
+    activations: Any,
+    packets: Any,
+    output: Any,
+    *,
+    weight_buffer: Any,
+    workspace: Any | None,
+    workspace_bytes: int,
+    batch: int,
+    n: int,
+    k: int,
+    group_size: int,
+    packet_stride: int,
+    stream_ptr: int,
+) -> None:
+    workspace_ptr = 0 if workspace is None else int(workspace.data_ptr())
+    native.cublaslt_fp16_after_packet_dequant(
+        activations.data_ptr(),
+        packets.data_ptr(),
+        output.data_ptr(),
+        weight_buffer.data_ptr(),
+        workspace_ptr,
+        workspace_bytes,
+        batch,
+        n,
+        k,
+        group_size,
+        packet_stride,
         stream_ptr,
     )
 
@@ -195,20 +371,76 @@ def _arc_split_k_candidate_slices(
     num_groups = k // group_size
     desired_slices = (sm_count + resident_ctas - 1) // resident_ctas
     preferred = [1, 2, 4, 6, 8, 12, 16]
-    candidates = {
-        candidate
-        for candidate in preferred
-        if 1 <= candidate <= num_groups
-    }
+    candidates = {candidate for candidate in preferred if 1 <= candidate <= num_groups}
     candidates.add(min(num_groups, max(2, desired_slices)))
     candidates.add(min(num_groups, max(2, desired_slices * 2)))
     return sorted(candidates)
+
+
+def _run_scalar_once(
+    native: Any,
+    activations: Any,
+    packets: Any,
+    group_sums: Any,
+    output: Any,
+    *,
+    batch: int,
+    n: int,
+    k: int,
+    group_size: int,
+    packet_stride: int,
+    split_k_slices: int,
+    partials: Any | None,
+    stream_ptr: int,
+) -> None:
+    _compute_arc_group_sums(
+        native,
+        activations,
+        group_sums,
+        batch=batch,
+        k=k,
+        group_size=group_size,
+        stream_ptr=stream_ptr,
+    )
+    if split_k_slices <= 1:
+        _arc_forward_scalar_direct(
+            native,
+            activations,
+            packets,
+            group_sums,
+            output,
+            batch=batch,
+            n=n,
+            k=k,
+            group_size=group_size,
+            packet_stride=packet_stride,
+            stream_ptr=stream_ptr,
+        )
+        return
+    if partials is None:
+        raise ValueError("partials are required when split_k_slices > 1")
+    _arc_forward_scalar_split_k(
+        native,
+        activations,
+        packets,
+        group_sums,
+        output,
+        partials,
+        batch=batch,
+        n=n,
+        k=k,
+        group_size=group_size,
+        packet_stride=packet_stride,
+        split_k_slices=split_k_slices,
+        stream_ptr=stream_ptr,
+    )
 
 
 def _autotune_arc_split_k_slices(
     native: Any,
     activations: Any,
     packets: Any,
+    group_sums: Any,
     output: Any,
     *,
     batch: int,
@@ -218,7 +450,7 @@ def _autotune_arc_split_k_slices(
     packet_stride: int,
 ) -> int:
     torch = _require_torch()
-    cache_key = (activations.device.index or 0, batch, n, k, group_size)
+    cache_key = (_device_index(activations.device), batch, n, k, group_size)
     cached = _ARC_SPLIT_K_TUNING_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -249,68 +481,42 @@ def _autotune_arc_split_k_slices(
             )
 
         for _ in range(2):
-            if split_k_slices <= 1:
-                _arc_forward_direct(
-                    native,
-                    activations,
-                    packets,
-                    output,
-                    batch=batch,
-                    n=n,
-                    k=k,
-                    group_size=group_size,
-                    packet_stride=packet_stride,
-                    stream_ptr=stream_ptr,
-                )
-            else:
-                _arc_forward_split_k(
-                    native,
-                    activations,
-                    packets,
-                    output,
-                    partials,
-                    batch=batch,
-                    n=n,
-                    k=k,
-                    group_size=group_size,
-                    packet_stride=packet_stride,
-                    split_k_slices=split_k_slices,
-                    stream_ptr=stream_ptr,
-                )
+            _run_scalar_once(
+                native,
+                activations,
+                packets,
+                group_sums,
+                output,
+                batch=batch,
+                n=n,
+                k=k,
+                group_size=group_size,
+                packet_stride=packet_stride,
+                split_k_slices=split_k_slices,
+                partials=partials,
+                stream_ptr=stream_ptr,
+            )
 
         samples: list[float] = []
         for _ in range(4):
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            if split_k_slices <= 1:
-                _arc_forward_direct(
-                    native,
-                    activations,
-                    packets,
-                    output,
-                    batch=batch,
-                    n=n,
-                    k=k,
-                    group_size=group_size,
-                    packet_stride=packet_stride,
-                    stream_ptr=stream_ptr,
-                )
-            else:
-                _arc_forward_split_k(
-                    native,
-                    activations,
-                    packets,
-                    output,
-                    partials,
-                    batch=batch,
-                    n=n,
-                    k=k,
-                    group_size=group_size,
-                    packet_stride=packet_stride,
-                    split_k_slices=split_k_slices,
-                    stream_ptr=stream_ptr,
-                )
+            _run_scalar_once(
+                native,
+                activations,
+                packets,
+                group_sums,
+                output,
+                batch=batch,
+                n=n,
+                k=k,
+                group_size=group_size,
+                packet_stride=packet_stride,
+                split_k_slices=split_k_slices,
+                partials=partials,
+                stream_ptr=stream_ptr,
+            )
             end.record()
             end.synchronize()
             samples.append(float(start.elapsed_time(end)) * 1000.0)
@@ -322,6 +528,158 @@ def _autotune_arc_split_k_slices(
 
     _ARC_SPLIT_K_TUNING_CACHE[cache_key] = best_slices
     return best_slices
+
+
+def _candidate_impls(
+    *,
+    device: Any,
+    split_k_slices: int | None,
+) -> list[str]:
+    if split_k_slices is not None and split_k_slices > 1:
+        return [_ARC_IMPL_SCALAR]
+    return [impl for impl in arc_w4a16_supported_impls(device) if impl != _ARC_IMPL_AUTO]
+
+
+def _autotune_arc_impl(
+    native: Any,
+    activations: Any,
+    packets: Any,
+    group_sums: Any,
+    output: Any,
+    *,
+    batch: int,
+    n: int,
+    k: int,
+    group_size: int,
+    packet_stride: int,
+    split_k_slices: int | None,
+) -> str:
+    torch = _require_torch()
+    capability = _cuda_capability(activations.device)
+    cache_key = (
+        _device_index(activations.device),
+        batch,
+        n,
+        k,
+        group_size,
+        split_k_slices,
+    )
+    cached = _ARC_IMPL_TUNING_CACHE.get(cache_key)
+    if cached is not None:
+        if cached == _ARC_IMPL_WGMMA and not _capability_gte(capability, _WGMMA_MIN_CAPABILITY):
+            pass
+        elif cached == _ARC_IMPL_TC and not _capability_gte(capability, _TC_MIN_CAPABILITY):
+            pass
+        else:
+            return cached
+
+    candidates = _candidate_impls(device=activations.device, split_k_slices=split_k_slices)
+    if len(candidates) == 1:
+        _ARC_IMPL_TUNING_CACHE[cache_key] = candidates[0]
+        return candidates[0]
+
+    stream_ptr = _current_stream_ptr(activations.device)
+    best_impl = candidates[0]
+    best_us: float | None = None
+
+    for candidate in candidates:
+        if candidate == _ARC_IMPL_SCALAR:
+            chosen_split_k = (
+                _autotune_arc_split_k_slices(
+                    native,
+                    activations,
+                    packets,
+                    group_sums,
+                    output,
+                    batch=batch,
+                    n=n,
+                    k=k,
+                    group_size=group_size,
+                    packet_stride=packet_stride,
+                )
+                if split_k_slices is None
+                else split_k_slices
+            )
+            partials = None
+            if chosen_split_k > 1:
+                partials = _split_k_partials(
+                    device=activations.device,
+                    batch=batch,
+                    n=n,
+                    split_k_slices=chosen_split_k,
+                )
+
+            def _run_candidate(
+                *,
+                _chosen_split_k: int = chosen_split_k,
+                _partials: Any | None = partials,
+            ) -> None:
+                _run_scalar_once(
+                    native,
+                    activations,
+                    packets,
+                    group_sums,
+                    output,
+                    batch=batch,
+                    n=n,
+                    k=k,
+                    group_size=group_size,
+                    packet_stride=packet_stride,
+                    split_k_slices=_chosen_split_k,
+                    partials=_partials,
+                    stream_ptr=stream_ptr,
+                )
+
+        else:
+            workspace_bytes = _vendor_workspace_bytes_for_impl(candidate)
+            weight_buffer = _weight_buffer(device=activations.device, n=n, k=k)
+            workspace = _vendor_workspace(
+                device=activations.device,
+                workspace_bytes=workspace_bytes,
+            )
+
+            def _run_candidate(
+                *,
+                _weight_buffer: Any = weight_buffer,
+                _workspace: Any | None = workspace,
+                _workspace_bytes: int = workspace_bytes,
+            ) -> None:
+                _arc_forward_vendor_from_packets(
+                    native,
+                    activations,
+                    packets,
+                    output,
+                    weight_buffer=_weight_buffer,
+                    workspace=_workspace,
+                    workspace_bytes=_workspace_bytes,
+                    batch=batch,
+                    n=n,
+                    k=k,
+                    group_size=group_size,
+                    packet_stride=packet_stride,
+                    stream_ptr=stream_ptr,
+                )
+
+        for _ in range(2):
+            _run_candidate()
+
+        samples: list[float] = []
+        for _ in range(4):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            _run_candidate()
+            end.record()
+            end.synchronize()
+            samples.append(float(start.elapsed_time(end)) * 1000.0)
+
+        candidate_us = min(samples)
+        if best_us is None or candidate_us < best_us:
+            best_us = candidate_us
+            best_impl = candidate
+
+    _ARC_IMPL_TUNING_CACHE[cache_key] = best_impl
+    return best_impl
 
 
 def pack_arc_w4a16_packets(
@@ -384,6 +742,7 @@ def arc_w4a16_forward(
     output: torch.Tensor | None = None,
     split_k_slices: int | None = None,
     partials: torch.Tensor | None = None,
+    impl: str | None = None,
 ) -> torch.Tensor:
     torch = _require_torch()
     native = _require_cuda_backend()
@@ -408,67 +767,132 @@ def arc_w4a16_forward(
             raise ValueError(f"output must have shape {(batch, n)}")
 
     _check_same_cuda_device(("activations", activations), ("packets", packets), ("output", output))
-    if split_k_slices is None:
-        split_k_slices = _autotune_arc_split_k_slices(
+
+    resolved_impl = _resolve_arc_impl(activations.device, impl)
+    if split_k_slices is not None and split_k_slices < 1:
+        raise ValueError("split_k_slices must be positive")
+    if resolved_impl in {_ARC_IMPL_TC, _ARC_IMPL_WGMMA} and split_k_slices not in {None, 1}:
+        raise ValueError(f"split_k_slices is only supported by impl={_ARC_IMPL_SCALAR!r}")
+
+    group_sums = _group_sums_buffer(
+        device=activations.device,
+        batch=batch,
+        num_groups=num_groups,
+    )
+
+    if resolved_impl == _ARC_IMPL_AUTO:
+        resolved_impl = _autotune_arc_impl(
             native,
             activations,
             packets,
+            group_sums,
             output,
             batch=batch,
             n=n,
             k=k,
             group_size=group_size,
             packet_stride=packet_stride,
+            split_k_slices=split_k_slices,
         )
-    elif split_k_slices < 1:
-        raise ValueError("split_k_slices must be positive")
 
     stream_ptr = _current_stream_ptr(activations.device)
-    if split_k_slices <= 1:
-        _arc_forward_direct(
+    if resolved_impl == _ARC_IMPL_SCALAR:
+        chosen_split_k = split_k_slices
+        if chosen_split_k is None:
+            chosen_split_k = _autotune_arc_split_k_slices(
+                native,
+                activations,
+                packets,
+                group_sums,
+                output,
+                batch=batch,
+                n=n,
+                k=k,
+                group_size=group_size,
+                packet_stride=packet_stride,
+            )
+
+        if chosen_split_k <= 1:
+            _run_scalar_once(
+                native,
+                activations,
+                packets,
+                group_sums,
+                output,
+                batch=batch,
+                n=n,
+                k=k,
+                group_size=group_size,
+                packet_stride=packet_stride,
+                split_k_slices=1,
+                partials=None,
+                stream_ptr=stream_ptr,
+            )
+            return output
+
+        if partials is None:
+            partials = _split_k_partials(
+                device=activations.device,
+                batch=batch,
+                n=n,
+                split_k_slices=chosen_split_k,
+            )
+        else:
+            _check_cuda_tensor(partials, name="partials", dtype=torch.float32, ndim=3)
+            if tuple(partials.shape) != (chosen_split_k, batch, n):
+                raise ValueError(f"partials must have shape {(chosen_split_k, batch, n)}")
+            _check_same_cuda_device(
+                ("activations", activations),
+                ("packets", packets),
+                ("output", output),
+                ("partials", partials),
+            )
+
+        _run_scalar_once(
             native,
             activations,
             packets,
+            group_sums,
             output,
             batch=batch,
             n=n,
             k=k,
             group_size=group_size,
             packet_stride=packet_stride,
+            split_k_slices=chosen_split_k,
+            partials=partials,
             stream_ptr=stream_ptr,
         )
         return output
 
-    if partials is None:
-        partials = _split_k_partials(
-            device=activations.device,
-            batch=batch,
-            n=n,
-            split_k_slices=split_k_slices,
-        )
-    else:
-        _check_cuda_tensor(partials, name="partials", dtype=torch.float32, ndim=3)
-        if tuple(partials.shape) != (split_k_slices, batch, n):
-            raise ValueError(f"partials must have shape {(split_k_slices, batch, n)}")
-        _check_same_cuda_device(
-            ("activations", activations),
-            ("packets", packets),
-            ("output", output),
-            ("partials", partials),
-        )
-
-    _arc_forward_split_k(
+    workspace_bytes = _vendor_workspace_bytes_for_impl(resolved_impl)
+    weight_buffer = _weight_buffer(device=activations.device, n=n, k=k)
+    workspace = _vendor_workspace(
+        device=activations.device,
+        workspace_bytes=workspace_bytes,
+    )
+    named_tensors: list[tuple[str, Any]] = [
+        ("activations", activations),
+        ("packets", packets),
+        ("output", output),
+        ("weight_buffer", weight_buffer),
+    ]
+    if workspace is not None:
+        named_tensors.append(("workspace", workspace))
+    _check_same_cuda_device(*named_tensors)
+    _arc_forward_vendor_from_packets(
         native,
         activations,
         packets,
         output,
-        partials,
+        weight_buffer=weight_buffer,
+        workspace=workspace,
+        workspace_bytes=workspace_bytes,
         batch=batch,
         n=n,
         k=k,
         group_size=group_size,
         packet_stride=packet_stride,
-        split_k_slices=split_k_slices,
         stream_ptr=stream_ptr,
     )
     return output

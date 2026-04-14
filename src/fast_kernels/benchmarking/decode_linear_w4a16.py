@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from fast_kernels.ops import (
     arc_w4a16_forward,
+    arc_w4a16_supported_impls,
     cublaslt_fp16_after_dequant,
     dequant_w4a16_to_fp16,
     group_size_for_layout,
@@ -159,13 +160,13 @@ def _make_case_inputs(
     torch.manual_seed(seed)
 
     num_groups = k // group_size
-    activations = (
-        0.25 * torch.randn((batch, k), device=device, dtype=torch.float32)
-    ).to(torch.float16)
+    activations = (0.25 * torch.randn((batch, k), device=device, dtype=torch.float32)).to(
+        torch.float16
+    )
     q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8)
-    alpha = (
-        0.02 + (0.18 * torch.rand((n, num_groups), device=device, dtype=torch.float32))
-    ).to(torch.float16)
+    alpha = (0.02 + (0.18 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(
+        torch.float16
+    )
     zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
     beta = -(alpha * zero_points.to(dtype=torch.float16))
     return activations.contiguous(), q_u8.contiguous(), alpha.contiguous(), beta.contiguous()
@@ -261,6 +262,7 @@ def _run_kernel(
     k: int,
     group_size: int,
     output: Any,
+    impl: str | None = None,
 ) -> Any:
     return arc_w4a16_forward(
         activations,
@@ -269,7 +271,20 @@ def _run_kernel(
         k=k,
         group_size=group_size,
         output=output,
+        impl=impl,
     )
+
+
+def _kernel_impl_for_id(kernel_id: str) -> str | None:
+    if kernel_id == "decode/w4a16_linear":
+        return None
+    if kernel_id == "decode/w4a16_linear_scalar":
+        return "scalar"
+    if kernel_id == "decode/w4a16_linear_tc":
+        return "tc"
+    if kernel_id == "decode/w4a16_linear_wgmma":
+        return "wgmma"
+    raise ValueError(f"unsupported kernel id: {kernel_id}")
 
 
 def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[str]]:
@@ -279,13 +294,13 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
         "available.",
         f"Timing uses {WARMUP_ITERS} warmup iterations and "
         f"{TIMING_ITERS} measured iterations per subject.",
+        "Kernel subjects benchmark auto, scalar, Tensor Core, and WGMMA-capable dispatch paths.",
     ]
 
     torch = _require_torch()
     if torch is None:
         reason = (
-            "PyTorch is not installed. Run `uv sync --extra benchmark` to execute the "
-            "decode suite."
+            "PyTorch is not installed. Run `uv sync --extra benchmark` to execute the decode suite."
         )
         for dtype in suite.dtypes:
             for layout in suite.layouts:
@@ -322,7 +337,7 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
     if not cuda_decode_available():
         reason = (
             "Native module is not compiled with CUDA. Reinstall with "
-            "`CMAKE_ARGS=-DFK_ENABLE_CUDA=ON uv sync --extra benchmark`."
+            "`uv sync --extra benchmark` or opt back into CPU-only mode explicitly."
         )
         for dtype in suite.dtypes:
             for layout in suite.layouts:
@@ -387,6 +402,7 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
         return cases, notes
 
     device = torch.device("cuda")
+    supported_impls = set(arc_w4a16_supported_impls(device))
 
     for dtype in suite.dtypes:
         dtype_reason: str | None = None
@@ -502,21 +518,26 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
                         label="vendor baseline output",
                     )
 
-                    arc_w4a16_forward(
-                        activations,
-                        packets,
-                        n=n,
-                        k=k,
-                        group_size=group_size,
-                        output=kernel_output,
-                    )
-                    _assert_close(
-                        kernel_output,
-                        reference_output,
-                        atol=suite.tolerances.atol,
-                        rtol=suite.tolerances.rtol,
-                        label="ARC kernel output",
-                    )
+                    for kernel_id in suite.kernels.ids:
+                        impl = _kernel_impl_for_id(kernel_id)
+                        if impl is not None and impl not in supported_impls:
+                            continue
+                        arc_w4a16_forward(
+                            activations,
+                            packets,
+                            n=n,
+                            k=k,
+                            group_size=group_size,
+                            output=kernel_output,
+                            impl=impl,
+                        )
+                        _assert_close(
+                            kernel_output,
+                            reference_output,
+                            atol=suite.tolerances.atol,
+                            rtol=suite.tolerances.rtol,
+                            label=f"{kernel_id} output",
+                        )
                 except Exception as exc:  # pragma: no cover - exercised on GPU-only failures
                     for baseline_id in suite.baselines.ids:
                         cases.append(
@@ -548,7 +569,6 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
 
                 reference_subject = suite.baselines.ids[0]
                 vendor_subject = suite.baselines.ids[1]
-                kernel_subject = suite.kernels.ids[0]
 
                 reference_median, reference_p95 = _time_callable(
                     partial(
@@ -582,20 +602,6 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
                 )
                 subject_latencies[vendor_subject] = vendor_median
 
-                kernel_median, kernel_p95 = _time_callable(
-                    partial(
-                        _run_kernel,
-                        activations,
-                        packets,
-                        n=n,
-                        k=k,
-                        group_size=group_size,
-                        output=kernel_output,
-                    ),
-                    torch,
-                )
-                subject_latencies[kernel_subject] = kernel_median
-
                 vendor_speedup_denominator = subject_latencies[vendor_subject]
 
                 cases.append(
@@ -625,19 +631,52 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
                         throughput=_throughput_tokens_per_second(batch, vendor_median),
                     )
                 )
-                cases.append(
-                    _timed_case(
-                        subject_kind="kernel",
-                        subject_id=kernel_subject,
-                        dtype=dtype,
-                        layout=layout,
-                        shape_name=shape.name,
-                        dimensions=dimensions,
-                        latency_us_median=kernel_median,
-                        latency_us_p95=kernel_p95,
-                        throughput=_throughput_tokens_per_second(batch, kernel_median),
-                        speedup_vs={vendor_subject: vendor_speedup_denominator / kernel_median},
+                for kernel_id in suite.kernels.ids:
+                    impl = _kernel_impl_for_id(kernel_id)
+                    if impl is not None and impl not in supported_impls:
+                        cases.append(
+                            _skipped_case(
+                                subject_kind="kernel",
+                                subject_id=kernel_id,
+                                dtype=dtype,
+                                layout=layout,
+                                shape_name=shape.name,
+                                dimensions=dimensions,
+                                reason=(
+                                    f"{kernel_id} is unsupported on device capability "
+                                    f"{torch.cuda.get_device_capability(device)}"
+                                ),
+                            )
+                        )
+                        continue
+
+                    kernel_median, kernel_p95 = _time_callable(
+                        partial(
+                            _run_kernel,
+                            activations,
+                            packets,
+                            n=n,
+                            k=k,
+                            group_size=group_size,
+                            output=kernel_output,
+                            impl=impl,
+                        ),
+                        torch,
                     )
-                )
+                    subject_latencies[kernel_id] = kernel_median
+                    cases.append(
+                        _timed_case(
+                            subject_kind="kernel",
+                            subject_id=kernel_id,
+                            dtype=dtype,
+                            layout=layout,
+                            shape_name=shape.name,
+                            dimensions=dimensions,
+                            latency_us_median=kernel_median,
+                            latency_us_p95=kernel_p95,
+                            throughput=_throughput_tokens_per_second(batch, kernel_median),
+                            speedup_vs={vendor_subject: vendor_speedup_denominator / kernel_median},
+                        )
+                    )
 
     return cases, notes
