@@ -46,7 +46,8 @@ def render_summary_markdown(bundle: ResultBundle) -> str:
             "",
             "## Cases",
             "",
-            "| case | subject | dtype | layout | shape | status | median us | p95 us | tok/s | speedup |",
+            "| case | subject | dtype | layout | shape | status | "
+            "median us | p95 us | tok/s | speedup |",
             "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
         ]
     )

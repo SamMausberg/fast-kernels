@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from functools import partial
 from statistics import median
-from typing import TYPE_CHECKING, Any
+from typing import Any, Literal
 
 from fast_kernels.ops import (
     arc_w4a16_forward,
@@ -13,12 +14,9 @@ from fast_kernels.ops import (
 )
 from fast_kernels.schemas import BenchmarkCase, BenchmarkSuite
 
-if TYPE_CHECKING:  # pragma: no cover - imported only for typing
-    import torch
-
-
 WARMUP_ITERS = 4
 TIMING_ITERS = 12
+SubjectKind = Literal["kernel", "baseline"]
 
 
 def _require_torch() -> Any:
@@ -30,7 +28,7 @@ def _require_torch() -> Any:
 
 
 def _make_case_id(
-    subject_kind: str,
+    subject_kind: SubjectKind,
     subject_id: str,
     dtype: str,
     layout: str,
@@ -42,7 +40,7 @@ def _make_case_id(
 
 def _skipped_case(
     *,
-    subject_kind: str,
+    subject_kind: SubjectKind,
     subject_id: str,
     dtype: str,
     layout: str,
@@ -65,7 +63,7 @@ def _skipped_case(
 
 def _failed_case(
     *,
-    subject_kind: str,
+    subject_kind: SubjectKind,
     subject_id: str,
     dtype: str,
     layout: str,
@@ -88,7 +86,7 @@ def _failed_case(
 
 def _timed_case(
     *,
-    subject_kind: str,
+    subject_kind: SubjectKind,
     subject_id: str,
     dtype: str,
     layout: str,
@@ -161,9 +159,13 @@ def _make_case_inputs(
     torch.manual_seed(seed)
 
     num_groups = k // group_size
-    activations = (0.25 * torch.randn((batch, k), device=device, dtype=torch.float32)).to(torch.float16)
+    activations = (
+        0.25 * torch.randn((batch, k), device=device, dtype=torch.float32)
+    ).to(torch.float16)
     q_u8 = torch.randint(0, 256, (n, k // 2), device=device, dtype=torch.uint8)
-    alpha = (0.02 + (0.18 * torch.rand((n, num_groups), device=device, dtype=torch.float32))).to(torch.float16)
+    alpha = (
+        0.02 + (0.18 * torch.rand((n, num_groups), device=device, dtype=torch.float32))
+    ).to(torch.float16)
     zero_points = torch.randint(0, 16, (n, num_groups), device=device, dtype=torch.int16)
     beta = -(alpha * zero_points.to(dtype=torch.float16))
     return activations.contiguous(), q_u8.contiguous(), alpha.contiguous(), beta.contiguous()
@@ -189,7 +191,9 @@ def _explicit_reference_output(
 
 def _assert_close(actual: Any, expected: Any, *, atol: float, rtol: float, label: str) -> None:
     if bool(actual.shape != expected.shape):
-        raise AssertionError(f"{label} shape mismatch: {tuple(actual.shape)} vs {tuple(expected.shape)}")
+        raise AssertionError(
+            f"{label} shape mismatch: {tuple(actual.shape)} vs {tuple(expected.shape)}"
+        )
     if not bool(actual.dtype == expected.dtype):
         raise AssertionError(f"{label} dtype mismatch: {actual.dtype} vs {expected.dtype}")
     if bool(actual.allclose(expected, atol=atol, rtol=rtol)):
@@ -199,16 +203,90 @@ def _assert_close(actual: Any, expected: Any, *, atol: float, rtol: float, label
     raise AssertionError(f"{label} mismatch: max_abs_diff={max_diff:.6f}")
 
 
+def _run_reference(
+    torch: Any,
+    q_u8: Any,
+    alpha: Any,
+    beta: Any,
+    *,
+    group_size: int,
+    reference_weight: Any,
+    activations: Any,
+    reference_output: Any,
+) -> tuple[Any, Any]:
+    return (
+        dequant_w4a16_to_fp16(
+            q_u8,
+            alpha,
+            beta,
+            group_size=group_size,
+            output=reference_weight,
+        ),
+        torch.mm(
+            activations,
+            reference_weight.transpose(0, 1),
+            out=reference_output,
+        ),
+    )
+
+
+def _run_vendor(
+    activations: Any,
+    q_u8: Any,
+    alpha: Any,
+    beta: Any,
+    *,
+    group_size: int,
+    output: Any,
+    weight_buffer: Any,
+    workspace: Any,
+) -> Any:
+    return cublaslt_fp16_after_dequant(
+        activations,
+        q_u8,
+        alpha,
+        beta,
+        group_size=group_size,
+        output=output,
+        weight_buffer=weight_buffer,
+        workspace=workspace,
+    )
+
+
+def _run_kernel(
+    activations: Any,
+    packets: Any,
+    *,
+    n: int,
+    k: int,
+    group_size: int,
+    output: Any,
+) -> Any:
+    return arc_w4a16_forward(
+        activations,
+        packets,
+        n=n,
+        k=k,
+        group_size=group_size,
+        output=output,
+    )
+
+
 def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[str]]:
     cases: list[BenchmarkCase] = []
     notes = [
-        "Decode suite runs real CUDA work when torch and a CUDA-enabled native build are available.",
-        f"Timing uses {WARMUP_ITERS} warmup iterations and {TIMING_ITERS} measured iterations per subject.",
+        "Decode suite runs real CUDA work when torch and a CUDA-enabled native build are "
+        "available.",
+        f"Timing uses {WARMUP_ITERS} warmup iterations and "
+        f"{TIMING_ITERS} measured iterations per subject.",
     ]
 
     torch = _require_torch()
     if torch is None:
-        reason = "PyTorch is not installed. Run `uv sync --extra benchmark` to execute the decode suite."
+        reason = (
+            "PyTorch is not installed. Run `uv sync --extra benchmark` to execute the "
+            "decode suite."
+        )
         for dtype in suite.dtypes:
             for layout in suite.layouts:
                 for shape in suite.shapes:
@@ -242,7 +320,10 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
     from fast_kernels.ops import cuda_decode_available
 
     if not cuda_decode_available():
-        reason = "Native module is not compiled with CUDA. Reinstall with `CMAKE_ARGS=-DFK_ENABLE_CUDA=ON uv sync --extra benchmark`."
+        reason = (
+            "Native module is not compiled with CUDA. Reinstall with "
+            "`CMAKE_ARGS=-DFK_ENABLE_CUDA=ON uv sync --extra benchmark`."
+        )
         for dtype in suite.dtypes:
             for layout in suite.layouts:
                 for shape in suite.shapes:
@@ -470,22 +551,24 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
                 kernel_subject = suite.kernels.ids[0]
 
                 reference_median, reference_p95 = _time_callable(
-                    lambda: (
-                        dequant_w4a16_to_fp16(
-                            q_u8,
-                            alpha,
-                            beta,
-                            group_size=group_size,
-                            output=reference_weight,
-                        ),
-                        torch.mm(activations, reference_weight.transpose(0, 1), out=reference_output),
+                    partial(
+                        _run_reference,
+                        torch,
+                        q_u8,
+                        alpha,
+                        beta,
+                        group_size=group_size,
+                        reference_weight=reference_weight,
+                        activations=activations,
+                        reference_output=reference_output,
                     ),
                     torch,
                 )
                 subject_latencies[reference_subject] = reference_median
 
                 vendor_median, vendor_p95 = _time_callable(
-                    lambda: cublaslt_fp16_after_dequant(
+                    partial(
+                        _run_vendor,
                         activations,
                         q_u8,
                         alpha,
@@ -500,7 +583,8 @@ def run_decode_linear_w4a16_suite(suite: BenchmarkSuite) -> tuple[list[Benchmark
                 subject_latencies[vendor_subject] = vendor_median
 
                 kernel_median, kernel_p95 = _time_callable(
-                    lambda: arc_w4a16_forward(
+                    partial(
+                        _run_kernel,
                         activations,
                         packets,
                         n=n,

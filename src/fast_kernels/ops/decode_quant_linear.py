@@ -93,7 +93,11 @@ def _split_k_partials(
     torch = _require_torch()
     cache_key = (device.index or 0, split_k_slices, batch, n)
     partials = _ARC_SPLIT_K_PARTIALS_CACHE.get(cache_key)
-    if partials is None or tuple(partials.shape) != (split_k_slices, batch, n) or partials.device != device:
+    if (
+        partials is None
+        or tuple(partials.shape) != (split_k_slices, batch, n)
+        or partials.device != device
+    ):
         partials = torch.empty((split_k_slices, batch, n), device=device, dtype=torch.float32)
         _ARC_SPLIT_K_PARTIALS_CACHE[cache_key] = partials
     return partials
@@ -321,13 +325,13 @@ def _autotune_arc_split_k_slices(
 
 
 def pack_arc_w4a16_packets(
-    q_u8: "torch.Tensor",
-    alpha: "torch.Tensor",
-    beta: "torch.Tensor",
+    q_u8: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
     *,
     group_size: int,
-    packets: "torch.Tensor | None" = None,
-) -> "torch.Tensor":
+    packets: torch.Tensor | None = None,
+) -> torch.Tensor:
     torch = _require_torch()
     native = _require_cuda_backend()
     _check_cuda_tensor(q_u8, name="q_u8", dtype=torch.uint8, ndim=2)
@@ -371,16 +375,16 @@ def pack_arc_w4a16_packets(
 
 
 def arc_w4a16_forward(
-    activations: "torch.Tensor",
-    packets: "torch.Tensor",
+    activations: torch.Tensor,
+    packets: torch.Tensor,
     *,
     n: int,
     k: int,
     group_size: int,
-    output: "torch.Tensor | None" = None,
+    output: torch.Tensor | None = None,
     split_k_slices: int | None = None,
-    partials: "torch.Tensor | None" = None,
-) -> "torch.Tensor":
+    partials: torch.Tensor | None = None,
+) -> torch.Tensor:
     torch = _require_torch()
     native = _require_cuda_backend()
     _check_cuda_tensor(activations, name="activations", dtype=torch.float16, ndim=2)
@@ -471,13 +475,13 @@ def arc_w4a16_forward(
 
 
 def dequant_w4a16_to_fp16(
-    q_u8: "torch.Tensor",
-    alpha: "torch.Tensor",
-    beta: "torch.Tensor",
+    q_u8: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
     *,
     group_size: int,
-    output: "torch.Tensor | None" = None,
-) -> "torch.Tensor":
+    output: torch.Tensor | None = None,
+) -> torch.Tensor:
     torch = _require_torch()
     native = _require_cuda_backend()
     _check_cuda_tensor(q_u8, name="q_u8", dtype=torch.uint8, ndim=2)
@@ -514,16 +518,16 @@ def dequant_w4a16_to_fp16(
 
 
 def cublaslt_fp16_after_dequant(
-    activations: "torch.Tensor",
-    q_u8: "torch.Tensor",
-    alpha: "torch.Tensor",
-    beta: "torch.Tensor",
+    activations: torch.Tensor,
+    q_u8: torch.Tensor,
+    alpha: torch.Tensor,
+    beta: torch.Tensor,
     *,
     group_size: int,
-    output: "torch.Tensor | None" = None,
-    weight_buffer: "torch.Tensor | None" = None,
-    workspace: "torch.Tensor | None" = None,
-) -> "torch.Tensor":
+    output: torch.Tensor | None = None,
+    weight_buffer: torch.Tensor | None = None,
+    workspace: torch.Tensor | None = None,
+) -> torch.Tensor:
     torch = _require_torch()
     native = _require_cuda_backend()
     _check_cuda_tensor(activations, name="activations", dtype=torch.float16, ndim=2)
