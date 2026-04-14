@@ -9,6 +9,8 @@ on:
 jobs:
   cpu:
     runs-on: ubuntu-latest
+    env:
+      CMAKE_ARGS: -DFK_ENABLE_CUDA=OFF
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
