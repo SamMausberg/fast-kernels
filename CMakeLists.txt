@@ -30,6 +30,7 @@ pybind11_add_module(
 )
 
 target_include_directories(_native PRIVATE csrc/include)
+target_include_directories(_native PRIVATE csrc)
 target_compile_features(_native PRIVATE cxx_std_20)
 target_compile_definitions(
   _native
@@ -40,8 +41,13 @@ target_compile_definitions(
 )
 
 if(FK_ENABLE_CUDA)
-  target_sources(_native PRIVATE csrc/kernels/template/noop.cu)
-  target_link_libraries(_native PRIVATE CUDA::cudart)
+  target_sources(
+    _native
+    PRIVATE
+      csrc/kernels/template/noop.cu
+      csrc/kernels/decode_quant_linear/arc_w4a16.cu
+  )
+  target_link_libraries(_native PRIVATE CUDA::cudart CUDA::cublasLt CUDA::cublas)
   target_compile_definitions(
     _native
     PRIVATE
@@ -58,4 +64,3 @@ else()
 endif()
 
 install(TARGETS _native LIBRARY DESTINATION fast_kernels)
-

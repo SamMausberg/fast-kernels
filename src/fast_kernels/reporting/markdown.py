@@ -5,6 +5,12 @@ from collections import Counter
 from fast_kernels.schemas import ResultBundle
 
 
+def _format_metric(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:.1f}"
+
+
 def render_summary_markdown(bundle: ResultBundle) -> str:
     status_counts = Counter(case.status for case in bundle.cases)
     lines = [
@@ -40,15 +46,22 @@ def render_summary_markdown(bundle: ResultBundle) -> str:
             "",
             "## Cases",
             "",
-            "| case | subject | dtype | layout | shape | status |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| case | subject | dtype | layout | shape | status | median us | p95 us | tok/s | speedup |",
+            "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- |",
         ]
     )
     for case in bundle.cases:
+        speedup = ", ".join(
+            f"{baseline}={value:.2f}x" for baseline, value in sorted(case.speedup_vs.items())
+        )
         lines.append(
             "| "
             f"`{case.case_id}` | `{case.subject_id}` | `{case.dtype}` | "
-            f"`{case.layout}` | `{case.shape_name}` | `{case.status}` |"
+            f"`{case.layout}` | `{case.shape_name}` | `{case.status}` | "
+            f"{_format_metric(case.latency_us_median)} | "
+            f"{_format_metric(case.latency_us_p95)} | "
+            f"{_format_metric(case.throughput)} | "
+            f"{speedup} |"
         )
     lines.append("")
     return "\n".join(lines)

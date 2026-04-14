@@ -24,7 +24,7 @@ def _build_parser() -> argparse.ArgumentParser:
     verify_parser = subparsers.add_parser("verify", help="Validate a benchmark suite.")
     verify_parser.add_argument("suite", type=Path, help="Path to the suite TOML file.")
 
-    bench_parser = subparsers.add_parser("bench", help="Materialize scaffold benchmark artifacts.")
+    bench_parser = subparsers.add_parser("bench", help="Run a benchmark suite and write result artifacts.")
     bench_parser.add_argument("suite", type=Path, help="Path to the suite TOML file.")
     bench_parser.add_argument(
         "--output-root",
@@ -90,7 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "bench":
         run_dir = benchmark_suite(args.suite, args.output_root)
-        console.print(f"[green]Wrote scaffold run to[/green] {run_dir}")
+        console.print(f"[green]Wrote benchmark run to[/green] {run_dir}")
         return 0
 
     if args.command == "report":

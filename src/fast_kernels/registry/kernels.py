@@ -18,10 +18,10 @@ def kernel_registry() -> dict[str, KernelSpec]:
             kernel_id="decode/w4a16_linear",
             family="decode_quant_linear",
             description=(
-                "Decode-side weight-only linear kernel scaffold for fused "
-                "dequantization and small-batch inference."
+                "Experimental ARC decode kernel for affine W4A16 weight-only "
+                "linear layers at small batch sizes."
             ),
-            maturity="scaffold",
+            maturity="experimental",
             ptx_hotspots=True,
         ),
         "template/noop_gemm": KernelSpec(

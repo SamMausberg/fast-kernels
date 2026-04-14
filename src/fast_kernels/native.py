@@ -20,6 +20,12 @@ def native_available() -> bool:
     return _native is not None
 
 
+def native_module() -> ModuleType:
+    if _native is None:
+        raise RuntimeError(f"native module unavailable: {_native_import_error}")
+    return _native
+
+
 def native_build_info() -> dict[str, Any]:
     if _native is None:
         return {

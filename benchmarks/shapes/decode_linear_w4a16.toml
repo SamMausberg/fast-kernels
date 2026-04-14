@@ -10,11 +10,25 @@ k = 4096
 batch = 1
 
 [[shape]]
+name = "llama_qkv_bs2"
+m = 1
+n = 4096
+k = 4096
+batch = 2
+
+[[shape]]
 name = "llama_qkv_bs4"
 m = 1
 n = 4096
 k = 4096
 batch = 4
+
+[[shape]]
+name = "llama_qkv_bs8"
+m = 1
+n = 4096
+k = 4096
+batch = 8
 
 [[shape]]
 name = "llama_mlp_up_bs1"
@@ -24,6 +38,13 @@ k = 4096
 batch = 1
 
 [[shape]]
+name = "llama_mlp_up_bs2"
+m = 1
+n = 14336
+k = 4096
+batch = 2
+
+[[shape]]
 name = "llama_mlp_up_bs4"
 m = 1
 n = 14336
@@ -31,11 +52,25 @@ k = 4096
 batch = 4
 
 [[shape]]
+name = "llama_mlp_up_bs8"
+m = 1
+n = 14336
+k = 4096
+batch = 8
+
+[[shape]]
 name = "llama_mlp_down_bs1"
 m = 1
 n = 4096
 k = 14336
 batch = 1
+
+[[shape]]
+name = "llama_mlp_down_bs2"
+m = 1
+n = 4096
+k = 14336
+batch = 2
 
 [[shape]]
 name = "llama_mlp_down_bs4"
@@ -50,4 +85,3 @@ m = 1
 n = 4096
 k = 14336
 batch = 8
-

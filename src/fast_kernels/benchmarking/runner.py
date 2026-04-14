@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
+from fast_kernels.benchmarking.decode_linear_w4a16 import run_decode_linear_w4a16_suite
 from fast_kernels.benchmarking.suites import load_suite
 from fast_kernels.env import collect_environment
 from fast_kernels.paths import default_results_root, repo_root
@@ -92,6 +93,19 @@ def _materialize_cases(suite: BenchmarkSuite) -> list[BenchmarkCase]:
     return cases
 
 
+def _execute_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[str]]:
+    if suite.id == "decode_linear_w4a16":
+        return run_decode_linear_w4a16_suite(suite)
+
+    return (
+        _materialize_cases(suite),
+        [
+            "Scaffold run: no real kernels or baselines are wired yet.",
+            "Result artifacts are meant to validate the repo flow before performance code lands.",
+        ],
+    )
+
+
 def benchmark_suite(
     suite_path: str | Path,
     output_root: str | Path | None = None,
@@ -107,6 +121,7 @@ def benchmark_suite(
     created_at = datetime.now(tz=UTC)
     git_sha = env.git_sha or "worktree"
     run_id = f"{created_at.strftime('%Y%m%dT%H%M%SZ')}-{git_sha}"
+    cases, notes = _execute_suite(suite)
     metadata = RunMetadata(
         run_id=run_id,
         suite_id=suite.id,
@@ -119,12 +134,9 @@ def benchmark_suite(
         nvidia_smi=env.nvidia_smi,
         nvcc_version=env.nvcc_version,
         torch_version=env.torch_version,
-        notes=[
-            "Scaffold run: no real kernels or baselines are wired yet.",
-            "Result artifacts are meant to validate the repo flow before performance code lands.",
-        ],
+        notes=notes,
     )
-    bundle = ResultBundle(metadata=metadata, cases=_materialize_cases(suite))
+    bundle = ResultBundle(metadata=metadata, cases=cases)
     root = Path(output_root) if output_root is not None else default_results_root()
     run_dir = root / suite.id / run_id
     write_result_bundle(run_dir, bundle)

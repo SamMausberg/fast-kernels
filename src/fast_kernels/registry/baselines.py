@@ -13,17 +13,17 @@ class BaselineSpec:
 
 def baseline_registry() -> dict[str, BaselineSpec]:
     return {
-        "torch/torchao_w4a16_linear": BaselineSpec(
-            baseline_id="torch/torchao_w4a16_linear",
+        "torch/reference_w4a16_linear": BaselineSpec(
+            baseline_id="torch/reference_w4a16_linear",
             source="framework",
-            description="TorchAO weight-only linear baseline placeholder.",
-            maturity="scaffold",
+            description="Reference dequantize-plus-torch.mm W4A16 baseline.",
+            maturity="experimental",
         ),
         "vendor/cublaslt_fp16_after_dequant": BaselineSpec(
             baseline_id="vendor/cublaslt_fp16_after_dequant",
             source="vendor",
-            description="Separate dequant plus cuBLASLt linear baseline placeholder.",
-            maturity="scaffold",
+            description="Vendor cuBLASLt FP16 matmul after fused native W4A16 dequantization.",
+            maturity="experimental",
         ),
         "torch/reference_gemm": BaselineSpec(
             baseline_id="torch/reference_gemm",
