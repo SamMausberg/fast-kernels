@@ -17,4 +17,3 @@ body:
       description: Explain why this benchmark should exist and what it should compare against.
     validations:
       required: true
-

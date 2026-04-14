@@ -17,4 +17,3 @@ body:
       description: Include commands, suite paths, and environment details.
     validations:
       required: true
-

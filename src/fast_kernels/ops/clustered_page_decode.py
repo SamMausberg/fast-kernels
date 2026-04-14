@@ -32,6 +32,8 @@ class PagedKVCache:
     page_size: int
     num_kv_heads: int
     head_dim: int
+    keys_pre_rope: bool = False
+    key_rope_theta: float | None = None
 
     @property
     def total_pages(self) -> int:
@@ -194,6 +196,26 @@ def _build_logical_pages(
     return key_pages.contiguous(), value_pages.contiguous()
 
 
+def _rotate_dense_keys(
+    keys: Any,
+    seq_lens: Any,
+    rope_theta: float,
+) -> Any:
+    torch = _require_torch()
+    rotated = keys.clone()
+    for request_index in range(int(seq_lens.shape[0])):
+        seq_len = int(seq_lens[request_index].item())
+        if seq_len <= 0:
+            continue
+        positions = torch.arange(seq_len, device=keys.device, dtype=torch.float32)
+        rotated[request_index, :, :seq_len, :] = _apply_llama_rope_torch(
+            rotated[request_index, :, :seq_len, :],
+            positions,
+            rope_theta,
+        )
+    return rotated
+
+
 def _build_page_table(
     seq_lens: Any,
     *,
@@ -242,6 +264,7 @@ def pack_paged_kv_bf16(
     page_size: int,
     fragment_pages: bool = True,
     seed: int | None = None,
+    key_rope_theta: float | None = None,
 ) -> PagedKVCache:
     torch = _require_torch()
     if keys.ndim != 4 or values.ndim != 4:
@@ -258,6 +281,8 @@ def pack_paged_kv_bf16(
     keys_bf16 = keys.to(dtype=torch.bfloat16).contiguous()
     values_bf16 = values.to(dtype=torch.bfloat16).contiguous()
     seq_lens_cpu = seq_lens.to(device="cpu", dtype=torch.int32).contiguous()
+    if key_rope_theta is not None:
+        keys_bf16 = _rotate_dense_keys(keys_bf16, seq_lens_cpu, float(key_rope_theta))
     logical_key_pages, logical_value_pages = _build_logical_pages(
         keys_bf16, values_bf16, seq_lens_cpu, page_size=page_size
     )
@@ -284,6 +309,8 @@ def pack_paged_kv_bf16(
         page_size=page_size,
         num_kv_heads=int(keys.shape[1]),
         head_dim=int(keys.shape[3]),
+        keys_pre_rope=key_rope_theta is not None,
+        key_rope_theta=None if key_rope_theta is None else float(key_rope_theta),
     )
 
 
@@ -349,6 +376,7 @@ def quantize_paged_kv_int8(
     page_size: int,
     fragment_pages: bool = True,
     seed: int | None = None,
+    key_rope_theta: float | None = None,
 ) -> PagedKVCache:
     packed = pack_paged_kv_bf16(
         keys,
@@ -357,6 +385,7 @@ def quantize_paged_kv_int8(
         page_size=page_size,
         fragment_pages=fragment_pages,
         seed=seed,
+        key_rope_theta=key_rope_theta,
     )
     key_bytes, value_bytes, key_scales, value_scales = _quantize_kv_int8(
         packed.reference_key_pages, packed.reference_value_pages
@@ -374,6 +403,8 @@ def quantize_paged_kv_int8(
         page_size=packed.page_size,
         num_kv_heads=packed.num_kv_heads,
         head_dim=packed.head_dim,
+        keys_pre_rope=packed.keys_pre_rope,
+        key_rope_theta=packed.key_rope_theta,
     )
 
 
@@ -385,6 +416,7 @@ def quantize_paged_kv_fp8(
     page_size: int,
     fragment_pages: bool = True,
     seed: int | None = None,
+    key_rope_theta: float | None = None,
 ) -> PagedKVCache:
     packed = pack_paged_kv_bf16(
         keys,
@@ -393,6 +425,7 @@ def quantize_paged_kv_fp8(
         page_size=page_size,
         fragment_pages=fragment_pages,
         seed=seed,
+        key_rope_theta=key_rope_theta,
     )
     key_bytes, value_bytes, key_scales, value_scales = _quantize_kv_fp8(
         packed.reference_key_pages, packed.reference_value_pages
@@ -410,17 +443,21 @@ def quantize_paged_kv_fp8(
         page_size=packed.page_size,
         num_kv_heads=packed.num_kv_heads,
         head_dim=packed.head_dim,
+        keys_pre_rope=packed.keys_pre_rope,
+        key_rope_theta=packed.key_rope_theta,
     )
 
 
-def _default_cluster_size(max_pages: int, direct_page_threshold: int) -> int:
+def _default_cluster_size(max_pages: int, direct_page_threshold: int, group_size: int) -> int:
     torch = _require_torch()
     if max_pages <= direct_page_threshold:
         return 1
     if torch.cuda.is_available():
         major, _minor = torch.cuda.get_device_capability(torch.device("cuda"))
+        if major >= 12:
+            return 1
         if major >= 9:
-            return 4
+            return 2 if group_size >= 8 and max_pages >= 64 else 1
     return 1
 
 
@@ -448,6 +485,8 @@ def plan_clustered_page_decode(
         raise ValueError("seq_lens must be a 1D tensor with one entry per request")
     if num_q_heads % num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
+    if (num_q_heads // num_kv_heads) > 8:
+        raise ValueError("group_size must be <= 8")
     if head_dim not in {64, 128}:
         raise ValueError("head_dim must be 64 or 128")
     if page_size not in {16, 32}:
@@ -455,8 +494,9 @@ def plan_clustered_page_decode(
 
     batch = int(page_table_cpu.shape[0])
     max_pages = int(_pages_per_request(seq_lens_cpu, page_size).max().item())
+    group_size = num_q_heads // num_kv_heads
     effective_cluster_size = (
-        _default_cluster_size(max_pages, direct_page_threshold)
+        _default_cluster_size(max_pages, direct_page_threshold, group_size)
         if cluster_size is None
         else int(cluster_size)
     )
@@ -570,6 +610,8 @@ def clustered_page_decode(
         raise ValueError("query head count must be divisible by cache.num_kv_heads")
     if head_dim != cache.head_dim:
         raise ValueError("query head_dim must match cache head_dim")
+    if (num_q_heads // cache.num_kv_heads) > 8:
+        raise ValueError("clustered_page_decode currently only supports group_size <= 8")
 
     if plan is None:
         plan = plan_clustered_page_decode(
@@ -594,6 +636,16 @@ def clustered_page_decode(
     _check_cuda_tensor(output, name="output", dtype=torch.bfloat16, ndim=3)
     descriptor_tensors = plan.device_tensors(query.device)
     scale = softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(head_dim)
+    if cache.keys_pre_rope:
+        if cache.key_rope_theta is None:
+            raise ValueError("pre-rotated key caches must record key_rope_theta")
+        if not math.isclose(
+            float(cache.key_rope_theta),
+            float(rope_theta),
+            rel_tol=0.0,
+            abs_tol=0.0,
+        ):
+            raise ValueError("rope_theta must match the key_rope_theta used to build the cache")
     if cache.key_scales is not None or cache.value_scales is not None:
         _check_same_cuda_device(
             ("query", query),
@@ -621,6 +673,7 @@ def clustered_page_decode(
         cache.page_size,
         effective_cluster_size,
         _layout_id(cache.kv_layout),
+        int(cache.keys_pre_rope),
         float(scale),
         float(rope_theta),
         _current_stream_ptr(query.device),
@@ -699,13 +752,19 @@ def reference_clustered_page_decode(
         )
         for q_head_index in range(num_q_heads):
             kv_head_index = q_head_index // group_size
-            rotated_keys = _apply_llama_rope_torch(
-                dense_keys[request_index, kv_head_index, :seq_len, :], positions, rope_theta
+            key_slice = dense_keys[request_index, kv_head_index, :seq_len, :]
+            rotated_keys = (
+                key_slice
+                if cache.keys_pre_rope
+                else _apply_llama_rope_torch(key_slice, positions, rope_theta)
             )
-            logits = torch.matmul(
-                rotated_keys.to(torch.float32),
-                rotated_query[q_head_index].to(torch.float32),
-            ) * scale
+            logits = (
+                torch.matmul(
+                    rotated_keys.to(torch.float32),
+                    rotated_query[q_head_index].to(torch.float32),
+                )
+                * scale
+            )
             probs = torch.softmax(logits, dim=0)
             reference[request_index, q_head_index] = torch.matmul(
                 probs.to(torch.float32),

@@ -25,4 +25,3 @@ WORKDIR /workspace
 COPY . /workspace
 
 RUN uv sync --extra benchmark
-

@@ -12,4 +12,3 @@ repos:
       - id: trailing-whitespace
       - id: check-yaml
       - id: check-toml
-

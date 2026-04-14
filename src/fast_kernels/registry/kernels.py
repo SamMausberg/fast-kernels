@@ -18,8 +18,7 @@ def kernel_registry() -> dict[str, KernelSpec]:
             kernel_id="decode/w4a16_linear",
             family="decode_quant_linear",
             description=(
-                "Auto-dispatched ARC decode kernel for affine W4A16 weight-only "
-                "linear layers."
+                "Auto-dispatched ARC decode kernel for affine W4A16 weight-only linear layers."
             ),
             maturity="experimental",
             ptx_hotspots=True,
@@ -37,18 +36,14 @@ def kernel_registry() -> dict[str, KernelSpec]:
         "decode/w4a16_linear_tc": KernelSpec(
             kernel_id="decode/w4a16_linear_tc",
             family="decode_quant_linear",
-            description=(
-                "Tensor Core-backed ARC decode path using packet dequant plus cublasLt."
-            ),
+            description=("Tensor Core-backed ARC decode path using packet dequant plus cublasLt."),
             maturity="experimental",
             ptx_hotspots=True,
         ),
         "decode/w4a16_linear_wgmma": KernelSpec(
             kernel_id="decode/w4a16_linear_wgmma",
             family="decode_quant_linear",
-            description=(
-                "Warpgroup-capable ARC decode path using packet dequant plus cublasLt."
-            ),
+            description=("Warpgroup-capable ARC decode path using packet dequant plus cublasLt."),
             maturity="experimental",
             ptx_hotspots=True,
         ),

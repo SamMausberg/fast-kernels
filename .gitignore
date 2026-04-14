@@ -17,4 +17,3 @@ site/
 # Benchmark artifacts are versioned selectively.
 results/**/*
 !results/.gitkeep
-

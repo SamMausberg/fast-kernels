@@ -66,7 +66,48 @@ def _make_case_inputs(
     return query.contiguous(), keys.contiguous(), values.contiguous(), seq_lens.contiguous()
 
 
-def _assert_case(layout: str, force_impl: str) -> None:
+def _build_cache(
+    layout: str,
+    keys: Any,
+    values: Any,
+    seq_lens: Any,
+    *,
+    key_rope_theta: float | None = None,
+) -> Any:
+    if layout == "bf16_kv":
+        return pack_paged_kv_bf16(
+            keys,
+            values,
+            seq_lens,
+            page_size=16,
+            fragment_pages=True,
+            seed=1,
+            key_rope_theta=key_rope_theta,
+        )
+    if layout == "fp8_kv":
+        if not hasattr(torch, "float8_e4m3fn"):
+            pytest.skip("This PyTorch build does not expose torch.float8_e4m3fn")
+        return quantize_paged_kv_fp8(
+            keys,
+            values,
+            seq_lens,
+            page_size=16,
+            fragment_pages=True,
+            seed=1,
+            key_rope_theta=key_rope_theta,
+        )
+    return quantize_paged_kv_int8(
+        keys,
+        values,
+        seq_lens,
+        page_size=16,
+        fragment_pages=True,
+        seed=1,
+        key_rope_theta=key_rope_theta,
+    )
+
+
+def _assert_case(layout: str, force_impl: str, *, key_rope_theta: float | None = None) -> None:
     query, keys, values, seq_lens = _make_case_inputs(
         batch=2,
         num_q_heads=16,
@@ -75,25 +116,7 @@ def _assert_case(layout: str, force_impl: str) -> None:
         max_seq_len=128,
         page_size=16,
     )
-    if layout == "bf16_kv":
-        cache = pack_paged_kv_bf16(
-            keys,
-            values,
-            seq_lens,
-            page_size=16,
-            fragment_pages=True,
-            seed=1,
-        )
-    elif layout == "fp8_kv":
-        if not hasattr(torch, "float8_e4m3fn"):
-            pytest.skip("This PyTorch build does not expose torch.float8_e4m3fn")
-        cache = quantize_paged_kv_fp8(
-            keys, values, seq_lens, page_size=16, fragment_pages=True, seed=1
-        )
-    else:
-        cache = quantize_paged_kv_int8(
-            keys, values, seq_lens, page_size=16, fragment_pages=True, seed=1
-        )
+    cache = _build_cache(layout, keys, values, seq_lens, key_rope_theta=key_rope_theta)
 
     plan = plan_clustered_page_decode(
         page_table=cache.page_table,
@@ -118,3 +141,68 @@ def test_clustered_page_decode_matches_reference(layout: str, force_impl: str) -
 
 def test_clustered_page_decode_fp8_matches_reference() -> None:
     _assert_case("fp8_kv", "clustered")
+
+
+@pytest.mark.parametrize("layout", ["bf16_kv", "fp8_kv", "int8_kv"])
+@pytest.mark.parametrize("force_impl", ["direct", "clustered"])
+def test_clustered_page_decode_pre_rotated_keys_match_reference(
+    layout: str,
+    force_impl: str,
+) -> None:
+    _assert_case(layout, force_impl, key_rope_theta=10000.0)
+
+
+def test_clustered_page_decode_rejects_mismatched_pre_rotated_rope_theta() -> None:
+    query, keys, values, seq_lens = _make_case_inputs(
+        batch=2,
+        num_q_heads=16,
+        num_kv_heads=4,
+        head_dim=64,
+        max_seq_len=128,
+        page_size=16,
+    )
+    cache = _build_cache("bf16_kv", keys, values, seq_lens, key_rope_theta=10000.0)
+    with pytest.raises(ValueError, match="rope_theta must match"):
+        clustered_page_decode(query, cache, rope_theta=5000.0, force_impl="direct")
+
+
+def test_plan_clustered_page_decode_sm120_heuristic_prefers_direct_for_small_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device=None: (12, 0))
+
+    page_table = torch.arange(128, dtype=torch.int32).view(1, 128)
+    seq_lens = torch.tensor([2048], dtype=torch.int32)
+    plan = plan_clustered_page_decode(
+        page_table=page_table,
+        seq_lens=seq_lens,
+        num_q_heads=32,
+        num_kv_heads=8,
+        head_dim=128,
+        page_size=16,
+        kv_layout="bf16_kv",
+    )
+    assert plan.cluster_size == 1
+    assert plan.launch_mode == "direct"
+
+
+def test_plan_clustered_page_decode_sm120_heuristic_keeps_group8_on_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda _device=None: (12, 0))
+
+    page_table = torch.arange(128, dtype=torch.int32).view(1, 128)
+    seq_lens = torch.tensor([4096], dtype=torch.int32)
+    plan = plan_clustered_page_decode(
+        page_table=page_table,
+        seq_lens=seq_lens,
+        num_q_heads=32,
+        num_kv_heads=4,
+        head_dim=128,
+        page_size=32,
+        kv_layout="bf16_kv",
+    )
+    assert plan.cluster_size == 1
+    assert plan.launch_mode == "direct"

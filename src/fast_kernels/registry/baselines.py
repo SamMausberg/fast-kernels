@@ -41,8 +41,7 @@ def baseline_registry() -> dict[str, BaselineSpec]:
             baseline_id="torch/reference_clustered_page_decode",
             source="framework",
             description=(
-                "Torch exact paged decode reference with in-kernel-equivalent "
-                "RoPE semantics."
+                "Torch exact paged decode reference with in-kernel-equivalent RoPE semantics."
             ),
             maturity="experimental",
         ),
@@ -50,8 +49,7 @@ def baseline_registry() -> dict[str, BaselineSpec]:
             baseline_id="vendor/flashinfer_clustered_page_decode",
             source="vendor",
             description=(
-                "FlashInfer paged batch decode baseline adapter when the runtime "
-                "is available."
+                "FlashInfer paged batch decode baseline adapter when the runtime is available."
             ),
             maturity="experimental",
         ),

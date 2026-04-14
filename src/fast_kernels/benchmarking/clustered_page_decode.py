@@ -150,18 +150,21 @@ def _time_callable(fn: Any, torch: Any) -> tuple[float, float]:
 
 
 def _case_seed(shape: ShapeCase, layout: str) -> int:
-    return hash(
-        (
-            shape.name,
-            shape.batch,
-            shape.require_dimension("max_seq_len"),
-            shape.require_dimension("num_q_heads"),
-            shape.require_dimension("num_kv_heads"),
-            shape.require_dimension("head_dim"),
-            shape.require_dimension("page_size"),
-            layout,
+    return (
+        hash(
+            (
+                shape.name,
+                shape.batch,
+                shape.require_dimension("max_seq_len"),
+                shape.require_dimension("num_q_heads"),
+                shape.require_dimension("num_kv_heads"),
+                shape.require_dimension("head_dim"),
+                shape.require_dimension("page_size"),
+                layout,
+            )
         )
-    ) & 0x7FFFFFFF
+        & 0x7FFFFFFF
+    )
 
 
 def _make_inputs(torch: Any, shape: ShapeCase, layout: str) -> tuple[Any, Any, Any, Any]:
@@ -253,8 +256,7 @@ def run_clustered_page_decode_suite(
                                     shape_name=shape.name,
                                     dimensions=shape.dimensions(),
                                     reason=(
-                                        "PyTorch is required for clustered_page_decode "
-                                        "benchmarks."
+                                        "PyTorch is required for clustered_page_decode benchmarks."
                                     ),
                                 )
                             )
