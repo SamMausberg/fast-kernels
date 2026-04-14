@@ -10,7 +10,6 @@ The default path here is hand-written CUDA C++. Python is used for suite configs
 - `src/fast_kernels/`: CLI, schemas, registry, environment capture, and reporting
 - `benchmarks/`: suite definitions, shapes, baseline adapters, and runners
 - `results/`: versioned benchmark outputs
-- `docs/`: methodology and development notes
 
 ## Quickstart
 

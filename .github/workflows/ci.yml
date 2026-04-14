@@ -23,6 +23,3 @@ jobs:
         run: uv run mypy src
       - name: Test
         run: uv run pytest
-      - name: Docs
-        run: uv run mkdocs build --strict
-

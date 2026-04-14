@@ -9,7 +9,6 @@ uv sync
 uv run ruff check .
 uv run mypy src
 uv run pytest
-uv run mkdocs build --strict
 ```
 
 For CUDA-backed development:
@@ -32,4 +31,3 @@ CMAKE_ARGS=-DFK_ENABLE_CUDA=ON uv sync --extra benchmark
 - Keep raw results as JSON and CSV.
 - Do not commit large binary profiler dumps.
 - Note methodology changes in the same PR that changes the benchmark output.
-
