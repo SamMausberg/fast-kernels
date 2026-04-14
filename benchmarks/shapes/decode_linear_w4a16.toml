@@ -1,0 +1,53 @@
+schema_version = 1
+name = "decode_linear_w4a16"
+description = "Representative decode-time projection shapes for W4A16 weight-only linear kernels."
+
+[[shape]]
+name = "llama_qkv_bs1"
+m = 1
+n = 4096
+k = 4096
+batch = 1
+
+[[shape]]
+name = "llama_qkv_bs4"
+m = 1
+n = 4096
+k = 4096
+batch = 4
+
+[[shape]]
+name = "llama_mlp_up_bs1"
+m = 1
+n = 14336
+k = 4096
+batch = 1
+
+[[shape]]
+name = "llama_mlp_up_bs4"
+m = 1
+n = 14336
+k = 4096
+batch = 4
+
+[[shape]]
+name = "llama_mlp_down_bs1"
+m = 1
+n = 4096
+k = 14336
+batch = 1
+
+[[shape]]
+name = "llama_mlp_down_bs4"
+m = 1
+n = 4096
+k = 14336
+batch = 4
+
+[[shape]]
+name = "llama_mlp_down_bs8"
+m = 1
+n = 4096
+k = 14336
+batch = 8
+
