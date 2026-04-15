@@ -1,0 +1,46 @@
+schema_version = 1
+id = "rdkng_block"
+family = "rdkng"
+description = "Explicit-sketch block natural-gradient suite for recycled solves versus CG and official GaLore baselines."
+metric = "solves_per_second"
+tags = ["optimizer", "natural_gradient", "explicit_sketch", "rdkng", "galore"]
+dtypes = ["bf16"]
+layouts = ["compressible_drift", "noncompressible_control"]
+
+[kernels]
+ids = ["rdkng/explicit_sketch_hybrid", "rdkng/explicit_sketch_lowrank"]
+
+[baselines]
+ids = ["torch/plain_cg_reference", "official/galore_projector"]
+
+[metadata]
+seed = 13
+
+[metadata.rdkng]
+trajectory_steps = 8
+warmup_steps = 2
+basis_rank = 8
+hybrid_cg_iters = 4
+cg_reference_iters = 8
+lambda = 0.001
+tol = 0.0001
+solution_rank = 8
+reset_threshold = 0.5
+use_diag_preconditioner = true
+galore_update_proj_gap = 200
+galore_scale = 1.0
+galore_proj_type = "std"
+
+[[shapes]]
+name = "block4k_sketch8"
+m = 64
+n = 64
+k = 8
+batch = 1
+
+[[shapes]]
+name = "block16k_sketch16"
+m = 128
+n = 128
+k = 16
+batch = 1

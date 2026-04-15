@@ -61,4 +61,28 @@ def baseline_registry() -> dict[str, BaselineSpec]:
             ),
             maturity="experimental",
         ),
+        "torch/plain_cg_reference": BaselineSpec(
+            baseline_id="torch/plain_cg_reference",
+            source="framework",
+            description="Torch damped-CG baseline for explicit-sketch natural-gradient solves.",
+            maturity="experimental",
+        ),
+        "official/galore_projector": BaselineSpec(
+            baseline_id="official/galore_projector",
+            source="official",
+            description=(
+                "Official GaLore projector path from galore-torch, applied to the benchmarked "
+                "weight-gradient matrix."
+            ),
+            maturity="experimental",
+        ),
+        "official/galore_adamw": BaselineSpec(
+            baseline_id="official/galore_adamw",
+            source="official",
+            description=(
+                "Official GaLoreAdamW optimizer from galore-torch for the tiny-transformer "
+                "training benchmark."
+            ),
+            maturity="experimental",
+        ),
     }

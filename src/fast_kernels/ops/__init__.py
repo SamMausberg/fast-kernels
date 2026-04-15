@@ -29,11 +29,18 @@ from fast_kernels.ops.prefix_union_decode import (
     prefix_union_decode,
     reference_prefix_union_decode,
 )
+from fast_kernels.ops.rdkng import (
+    RDKNGExplicitSketchSolver,
+    RDKNGStepResult,
+    cuda_rdkng_available,
+)
 
 __all__ = [
     "ClusteredPageDecodePlan",
     "PagedKVCache",
     "PrefixUnionDecodePlan",
+    "RDKNGExplicitSketchSolver",
+    "RDKNGStepResult",
     "arc_packet_stride_bytes",
     "arc_w4a16_supported_impls",
     "arc_w4a16_forward",
@@ -42,6 +49,7 @@ __all__ = [
     "cuda_clustered_decode_available",
     "cuda_decode_available",
     "cuda_prefix_union_decode_available",
+    "cuda_rdkng_available",
     "dequant_w4a16_to_fp16",
     "estimate_page_decode_metrics",
     "estimate_prefix_union_decode_metrics",

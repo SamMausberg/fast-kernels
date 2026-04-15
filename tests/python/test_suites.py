@@ -75,3 +75,45 @@ def test_prefix_union_decode_suite_loads() -> None:
 def test_prefix_union_decode_suite_verifies() -> None:
     suite = load_suite(Path("benchmarks/suites/prefix_union_decode.toml"))
     assert verify_suite(suite) == []
+
+
+def test_rdkng_block_suite_loads() -> None:
+    suite = load_suite(Path("benchmarks/suites/rdkng_block.toml"))
+    assert suite.id == "rdkng_block"
+    assert suite.family == "rdkng"
+    assert suite.kernels.ids == [
+        "rdkng/explicit_sketch_hybrid",
+        "rdkng/explicit_sketch_lowrank",
+    ]
+    assert suite.baselines.ids == [
+        "torch/plain_cg_reference",
+        "official/galore_projector",
+    ]
+    assert suite.layouts == ["compressible_drift", "noncompressible_control"]
+    assert len(suite.shapes) == 2
+    assert suite.shapes[0].m == 64
+    assert suite.shapes[0].n == 64
+
+
+def test_rdkng_block_suite_verifies() -> None:
+    suite = load_suite(Path("benchmarks/suites/rdkng_block.toml"))
+    assert verify_suite(suite) == []
+
+
+def test_rdkng_training_suite_loads() -> None:
+    suite = load_suite(Path("benchmarks/suites/rdkng_training.toml"))
+    assert suite.id == "rdkng_training"
+    assert suite.family == "rdkng"
+    assert suite.layouts == ["teacher_student"]
+    assert suite.baselines.ids == [
+        "torch/plain_cg_reference",
+        "official/galore_adamw",
+    ]
+    assert len(suite.shapes) == 1
+    assert suite.shapes[0].batch == 8
+    assert suite.shapes[0].max_seq_len == 64
+
+
+def test_rdkng_training_suite_verifies() -> None:
+    suite = load_suite(Path("benchmarks/suites/rdkng_training.toml"))
+    assert verify_suite(suite) == []

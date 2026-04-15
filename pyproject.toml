@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 benchmark = [
+  "galore-torch>=1.0,<2",
   "torch>=2.11,<2.12",
 ]
 

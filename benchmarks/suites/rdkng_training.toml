@@ -1,0 +1,41 @@
+schema_version = 1
+id = "rdkng_training"
+family = "rdkng"
+description = "Tiny teacher-student transformer training suite that updates only the MLP up-projection block."
+metric = "steps_per_second"
+tags = ["optimizer", "training", "natural_gradient", "rdkng", "galore"]
+dtypes = ["bf16"]
+layouts = ["teacher_student"]
+
+[kernels]
+ids = ["rdkng/explicit_sketch_hybrid", "rdkng/explicit_sketch_lowrank"]
+
+[baselines]
+ids = ["torch/plain_cg_reference", "official/galore_adamw"]
+
+[metadata]
+seed = 29
+
+[metadata.rdkng]
+steps = 4
+basis_rank = 8
+hybrid_cg_iters = 4
+cg_reference_iters = 8
+lambda = 0.001
+tol = 0.0001
+lr = 0.1
+d_model = 128
+num_heads = 4
+d_ff = 512
+vocab_size = 2048
+reset_threshold = 0.5
+target_fraction = 0.75
+use_diag_preconditioner = true
+galore_update_proj_gap = 200
+galore_scale = 1.0
+galore_proj_type = "std"
+
+[[shapes]]
+name = "bs8_seq64"
+batch = 8
+max_seq_len = 64

@@ -6,6 +6,9 @@
 #include "ops/clustered_page_decode/clustered_page_decode.h"
 #include "ops/decode_quant_linear/arc_w4a16.h"
 #include "ops/prefix_union_decode/prefix_union_decode.h"
+#if FK_COMPILED_WITH_CUDA
+#include "ops/rdkng/explicit_sketch.h"
+#endif
 
 namespace py = pybind11;
 
@@ -23,6 +26,43 @@ PYBIND11_MODULE(_native, m) {
   });
 
 #if FK_COMPILED_WITH_CUDA
+  py::class_<fast_kernels::rdkng::StepStats>(m, "RDKNGStepStats")
+      .def(py::init<>())
+      .def_readonly("initial_residual_norm",
+                    &fast_kernels::rdkng::StepStats::initial_residual_norm)
+      .def_readonly("final_residual_norm",
+                    &fast_kernels::rdkng::StepStats::final_residual_norm)
+      .def_readonly("cg_steps_taken", &fast_kernels::rdkng::StepStats::cg_steps_taken)
+      .def_readonly("basis_refreshed", &fast_kernels::rdkng::StepStats::basis_refreshed);
+
+  py::class_<fast_kernels::rdkng::ExplicitSketchSolver>(m, "RDKNGExplicitSketchSolverHandle")
+      .def(py::init<int, int, int, int>(), py::arg("n"), py::arg("s"), py::arg("r"),
+           py::arg("max_cg"))
+      .def_property_readonly("n", &fast_kernels::rdkng::ExplicitSketchSolver::n)
+      .def_property_readonly("s", &fast_kernels::rdkng::ExplicitSketchSolver::s)
+      .def_property_readonly("r", &fast_kernels::rdkng::ExplicitSketchSolver::r)
+      .def_property_readonly("max_cg", &fast_kernels::rdkng::ExplicitSketchSolver::max_cg)
+      .def("workspace_bytes", &fast_kernels::rdkng::ExplicitSketchSolver::workspace_bytes)
+      .def(
+          "step",
+          [](fast_kernels::rdkng::ExplicitSketchSolver& solver, std::uintptr_t y_ptr,
+             std::uintptr_t grad_ptr, std::uintptr_t basis_in_ptr, std::uintptr_t basis_out_ptr,
+             float lambda, int cg_iters, float tol, std::uintptr_t out_v_ptr,
+             std::uintptr_t diag_ema_ptr, float diag_ema_beta, int basis_replace_col,
+             float basis_append_threshold, std::uintptr_t stream_ptr) {
+            py::gil_scoped_release release;
+            fast_kernels::rdkng::StepStats stats;
+            solver.step(y_ptr, grad_ptr, basis_in_ptr, basis_out_ptr, lambda, cg_iters, tol,
+                        out_v_ptr, diag_ema_ptr, diag_ema_beta, basis_replace_col,
+                        basis_append_threshold, stream_ptr, &stats);
+            return stats;
+          },
+          py::arg("y_ptr"), py::arg("grad_ptr"), py::arg("basis_in_ptr") = 0,
+          py::arg("basis_out_ptr") = 0, py::arg("lambda_"), py::arg("cg_iters"),
+          py::arg("tol"), py::arg("out_v_ptr"), py::arg("diag_ema_ptr") = 0,
+          py::arg("diag_ema_beta") = 0.95f, py::arg("basis_replace_col") = -1,
+          py::arg("basis_append_threshold") = 1.0e-4f, py::arg("stream_ptr") = 0);
+
   m.def(
       "clustered_page_decode_forward",
       [](std::uintptr_t query_ptr, std::uintptr_t key_ptr, std::uintptr_t value_ptr,

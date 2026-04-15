@@ -113,4 +113,24 @@ def kernel_registry() -> dict[str, KernelSpec]:
             maturity="experimental",
             ptx_hotspots=True,
         ),
+        "rdkng/explicit_sketch_hybrid": KernelSpec(
+            kernel_id="rdkng/explicit_sketch_hybrid",
+            family="rdkng",
+            description=(
+                "Explicit-sketch recycled natural-gradient solve with reduced solve plus "
+                "deflated CG cleanup."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
+        "rdkng/explicit_sketch_lowrank": KernelSpec(
+            kernel_id="rdkng/explicit_sketch_lowrank",
+            family="rdkng",
+            description=(
+                "Explicit-sketch recycled natural-gradient solve restricted to the recycled "
+                "subspace without CG cleanup."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
     }
