@@ -30,23 +30,25 @@ PYBIND11_MODULE(_native, m) {
          std::uintptr_t run_logical_starts_ptr, std::uintptr_t run_last_page_lens_ptr,
          std::uintptr_t request_run_offsets_ptr, std::uintptr_t seq_lens_ptr,
          std::uintptr_t output_ptr, int batch, int num_runs, int num_q_heads, int num_kv_heads,
-         int head_dim, int page_size, int cluster_size, int kv_format, int keys_pre_rope,
-         float softmax_scale, float rope_theta, std::uintptr_t stream_ptr) {
+         int head_dim, int page_size, int group_tile, int use_clustered_kernel, int cluster_size,
+         int kv_format, int keys_are_rotated, float softmax_scale, float rope_theta,
+         std::uintptr_t stream_ptr) {
         py::gil_scoped_release release;
         fast_kernels::clustered_page_decode::clustered_page_decode_forward(
             query_ptr, key_ptr, value_ptr, key_scales_ptr, value_scales_ptr, run_base_pages_ptr,
             run_page_counts_ptr, run_logical_starts_ptr, run_last_page_lens_ptr,
             request_run_offsets_ptr, seq_lens_ptr, output_ptr, batch, num_runs, num_q_heads,
-            num_kv_heads, head_dim, page_size, cluster_size, kv_format, keys_pre_rope,
-            softmax_scale, rope_theta, stream_ptr);
+            num_kv_heads, head_dim, page_size, group_tile, use_clustered_kernel, cluster_size,
+            kv_format, keys_are_rotated, softmax_scale, rope_theta, stream_ptr);
       },
       py::arg("query_ptr"), py::arg("key_ptr"), py::arg("value_ptr"), py::arg("key_scales_ptr"),
       py::arg("value_scales_ptr"), py::arg("run_base_pages_ptr"), py::arg("run_page_counts_ptr"),
       py::arg("run_logical_starts_ptr"), py::arg("run_last_page_lens_ptr"),
       py::arg("request_run_offsets_ptr"), py::arg("seq_lens_ptr"), py::arg("output_ptr"),
       py::arg("batch"), py::arg("num_runs"), py::arg("num_q_heads"), py::arg("num_kv_heads"),
-      py::arg("head_dim"), py::arg("page_size"), py::arg("cluster_size"), py::arg("kv_format"),
-      py::arg("keys_pre_rope"), py::arg("softmax_scale"), py::arg("rope_theta"),
+      py::arg("head_dim"), py::arg("page_size"), py::arg("group_tile"),
+      py::arg("use_clustered_kernel"), py::arg("cluster_size"), py::arg("kv_format"),
+      py::arg("keys_are_rotated"), py::arg("softmax_scale"), py::arg("rope_theta"),
       py::arg("stream_ptr"));
   m.def(
       "compute_arc_w4a16_group_sums",

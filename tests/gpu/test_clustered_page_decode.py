@@ -72,6 +72,7 @@ def _build_cache(
     values: Any,
     seq_lens: Any,
     *,
+    page_size: int,
     key_rope_theta: float | None = None,
 ) -> Any:
     if layout == "bf16_kv":
@@ -79,7 +80,7 @@ def _build_cache(
             keys,
             values,
             seq_lens,
-            page_size=16,
+            page_size=page_size,
             fragment_pages=True,
             seed=1,
             key_rope_theta=key_rope_theta,
@@ -91,7 +92,7 @@ def _build_cache(
             keys,
             values,
             seq_lens,
-            page_size=16,
+            page_size=page_size,
             fragment_pages=True,
             seed=1,
             key_rope_theta=key_rope_theta,
@@ -100,23 +101,42 @@ def _build_cache(
         keys,
         values,
         seq_lens,
-        page_size=16,
+        page_size=page_size,
         fragment_pages=True,
         seed=1,
         key_rope_theta=key_rope_theta,
     )
 
 
-def _assert_case(layout: str, force_impl: str, *, key_rope_theta: float | None = None) -> None:
+def _assert_case(
+    layout: str,
+    force_impl: str,
+    *,
+    batch: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    max_seq_len: int,
+    page_size: int,
+    cluster_size: int,
+    key_rope_theta: float | None = None,
+) -> None:
     query, keys, values, seq_lens = _make_case_inputs(
-        batch=2,
-        num_q_heads=16,
-        num_kv_heads=4,
-        head_dim=64,
-        max_seq_len=128,
-        page_size=16,
+        batch=batch,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        max_seq_len=max_seq_len,
+        page_size=page_size,
     )
-    cache = _build_cache(layout, keys, values, seq_lens, key_rope_theta=key_rope_theta)
+    cache = _build_cache(
+        layout,
+        keys,
+        values,
+        seq_lens,
+        page_size=page_size,
+        key_rope_theta=key_rope_theta,
+    )
 
     plan = plan_clustered_page_decode(
         page_table=cache.page_table,
@@ -126,21 +146,90 @@ def _assert_case(layout: str, force_impl: str, *, key_rope_theta: float | None =
         head_dim=cache.head_dim,
         page_size=cache.page_size,
         kv_layout=cache.kv_layout,
-        cluster_size=4 if force_impl == "clustered" else 1,
+        cluster_size=cluster_size,
     )
     actual = clustered_page_decode(query, cache, plan=plan, force_impl=force_impl)
     expected = reference_clustered_page_decode(query, cache)
     torch.testing.assert_close(actual, expected, atol=1.25e-1, rtol=3e-2)
 
 
-@pytest.mark.parametrize("layout", ["bf16_kv", "int8_kv"])
-@pytest.mark.parametrize("force_impl", ["direct", "clustered"])
-def test_clustered_page_decode_matches_reference(layout: str, force_impl: str) -> None:
-    _assert_case(layout, force_impl)
+@pytest.mark.parametrize(
+    ("layout", "force_impl", "shape"),
+    [
+        (
+            "bf16_kv",
+            "direct",
+            dict(
+                batch=2,
+                num_q_heads=4,
+                num_kv_heads=4,
+                head_dim=64,
+                max_seq_len=64,
+                page_size=16,
+                cluster_size=1,
+            ),
+        ),
+        (
+            "bf16_kv",
+            "direct",
+            dict(
+                batch=2,
+                num_q_heads=16,
+                num_kv_heads=4,
+                head_dim=64,
+                max_seq_len=128,
+                page_size=16,
+                cluster_size=1,
+            ),
+        ),
+        (
+            "int8_kv",
+            "clustered",
+            dict(
+                batch=2,
+                num_q_heads=32,
+                num_kv_heads=4,
+                head_dim=128,
+                max_seq_len=256,
+                page_size=32,
+                cluster_size=2,
+            ),
+        ),
+        (
+            "bf16_kv",
+            "clustered",
+            dict(
+                batch=2,
+                num_q_heads=32,
+                num_kv_heads=1,
+                head_dim=128,
+                max_seq_len=256,
+                page_size=32,
+                cluster_size=2,
+            ),
+        ),
+    ],
+)
+def test_clustered_page_decode_matches_reference(
+    layout: str,
+    force_impl: str,
+    shape: dict[str, int],
+) -> None:
+    _assert_case(layout, force_impl, **shape)
 
 
 def test_clustered_page_decode_fp8_matches_reference() -> None:
-    _assert_case("fp8_kv", "clustered")
+    _assert_case(
+        "fp8_kv",
+        "clustered",
+        batch=2,
+        num_q_heads=32,
+        num_kv_heads=4,
+        head_dim=128,
+        max_seq_len=256,
+        page_size=32,
+        cluster_size=2,
+    )
 
 
 @pytest.mark.parametrize("layout", ["bf16_kv", "fp8_kv", "int8_kv"])
@@ -149,7 +238,27 @@ def test_clustered_page_decode_pre_rotated_keys_match_reference(
     layout: str,
     force_impl: str,
 ) -> None:
-    _assert_case(layout, force_impl, key_rope_theta=10000.0)
+    if force_impl == "direct":
+        shape = dict(
+            batch=2,
+            num_q_heads=16,
+            num_kv_heads=4,
+            head_dim=64,
+            max_seq_len=128,
+            page_size=16,
+            cluster_size=1,
+        )
+    else:
+        shape = dict(
+            batch=2,
+            num_q_heads=32,
+            num_kv_heads=1,
+            head_dim=128,
+            max_seq_len=256,
+            page_size=32,
+            cluster_size=2,
+        )
+    _assert_case(layout, force_impl, key_rope_theta=10000.0, **shape)
 
 
 def test_clustered_page_decode_rejects_mismatched_pre_rotated_rope_theta() -> None:
@@ -161,12 +270,19 @@ def test_clustered_page_decode_rejects_mismatched_pre_rotated_rope_theta() -> No
         max_seq_len=128,
         page_size=16,
     )
-    cache = _build_cache("bf16_kv", keys, values, seq_lens, key_rope_theta=10000.0)
+    cache = _build_cache(
+        "bf16_kv",
+        keys,
+        values,
+        seq_lens,
+        page_size=16,
+        key_rope_theta=10000.0,
+    )
     with pytest.raises(ValueError, match="rope_theta must match"):
         clustered_page_decode(query, cache, rope_theta=5000.0, force_impl="direct")
 
 
-def test_plan_clustered_page_decode_sm120_heuristic_prefers_direct_for_small_groups(
+def test_plan_clustered_page_decode_sm120_heuristic_prefers_clustered_for_long_groups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -183,11 +299,13 @@ def test_plan_clustered_page_decode_sm120_heuristic_prefers_direct_for_small_gro
         page_size=16,
         kv_layout="bf16_kv",
     )
-    assert plan.cluster_size == 1
-    assert plan.launch_mode == "direct"
+    assert plan.cluster_size == 4
+    assert plan.group_tile == 4
+    assert plan.q_head_tiles == 1
+    assert plan.launch_mode == "clustered"
 
 
-def test_plan_clustered_page_decode_sm120_heuristic_keeps_group8_on_direct(
+def test_plan_clustered_page_decode_sm120_heuristic_uses_group_tile8_for_large_groups(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -199,10 +317,44 @@ def test_plan_clustered_page_decode_sm120_heuristic_keeps_group8_on_direct(
         page_table=page_table,
         seq_lens=seq_lens,
         num_q_heads=32,
-        num_kv_heads=4,
+        num_kv_heads=1,
         head_dim=128,
         page_size=32,
         kv_layout="bf16_kv",
     )
+    assert plan.cluster_size == 2
+    assert plan.group_tile == 8
+    assert plan.q_head_tiles == 4
+    assert plan.launch_mode == "clustered"
+
+
+def test_plan_clustered_page_decode_prefers_direct_for_short_cases() -> None:
+    page_table = torch.arange(4, dtype=torch.int32).view(1, 4)
+    seq_lens = torch.tensor([64], dtype=torch.int32)
+    plan = plan_clustered_page_decode(
+        page_table=page_table,
+        seq_lens=seq_lens,
+        num_q_heads=16,
+        num_kv_heads=4,
+        head_dim=64,
+        page_size=16,
+        kv_layout="bf16_kv",
+    )
+    assert plan.group_tile == 4
+    assert plan.q_head_tiles == 1
     assert plan.cluster_size == 1
     assert plan.launch_mode == "direct"
+
+
+def test_clustered_page_decode_force_direct_rejects_large_group() -> None:
+    query, keys, values, seq_lens = _make_case_inputs(
+        batch=1,
+        num_q_heads=32,
+        num_kv_heads=1,
+        head_dim=128,
+        max_seq_len=128,
+        page_size=32,
+    )
+    cache = _build_cache("bf16_kv", keys, values, seq_lens, page_size=32)
+    with pytest.raises(ValueError, match='force_impl="direct" only supports group_size <= 8'):
+        clustered_page_decode(query, cache, force_impl="direct")

@@ -32,7 +32,7 @@ class PagedKVCache:
     page_size: int
     num_kv_heads: int
     head_dim: int
-    keys_pre_rope: bool = False
+    keys_are_rotated: bool = False
     key_rope_theta: float | None = None
 
     @property
@@ -49,10 +49,12 @@ class ClusteredPageDecodePlan:
     head_dim: int
     kv_layout: Literal["bf16_kv", "fp8_kv", "int8_kv"]
     max_pages: int
+    group_tile: int
+    q_head_tiles: int
     cluster_size: int
     direct_page_threshold: int
     pdl_page_threshold: int
-    launch_mode: Literal["direct", "clustered", "pdl_fallback"]
+    launch_mode: Literal["direct", "clustered"]
     run_base_pages_cpu: Any
     run_page_counts_cpu: Any
     run_logical_starts_cpu: Any
@@ -309,7 +311,7 @@ def pack_paged_kv_bf16(
         page_size=page_size,
         num_kv_heads=int(keys.shape[1]),
         head_dim=int(keys.shape[3]),
-        keys_pre_rope=key_rope_theta is not None,
+        keys_are_rotated=key_rope_theta is not None,
         key_rope_theta=None if key_rope_theta is None else float(key_rope_theta),
     )
 
@@ -403,7 +405,7 @@ def quantize_paged_kv_int8(
         page_size=packed.page_size,
         num_kv_heads=packed.num_kv_heads,
         head_dim=packed.head_dim,
-        keys_pre_rope=packed.keys_pre_rope,
+        keys_are_rotated=packed.keys_are_rotated,
         key_rope_theta=packed.key_rope_theta,
     )
 
@@ -443,9 +445,19 @@ def quantize_paged_kv_fp8(
         page_size=packed.page_size,
         num_kv_heads=packed.num_kv_heads,
         head_dim=packed.head_dim,
-        keys_pre_rope=packed.keys_pre_rope,
+        keys_are_rotated=packed.keys_are_rotated,
         key_rope_theta=packed.key_rope_theta,
     )
+
+
+def _default_group_tile(group_size: int) -> int:
+    if group_size <= 1:
+        return 1
+    if group_size <= 2:
+        return 2
+    if group_size <= 4:
+        return 4
+    return 8
 
 
 def _default_cluster_size(max_pages: int, direct_page_threshold: int, group_size: int) -> int:
@@ -455,8 +467,16 @@ def _default_cluster_size(max_pages: int, direct_page_threshold: int, group_size
     if torch.cuda.is_available():
         major, _minor = torch.cuda.get_device_capability(torch.device("cuda"))
         if major >= 12:
+            if max_pages >= 192:
+                return 4
+            if max_pages >= 128:
+                return 2 if group_size > 8 else 4
+            if max_pages >= 64:
+                return 2
             return 1
         if major >= 9:
+            if max_pages >= 128:
+                return 4 if group_size >= 8 else 2
             return 2 if group_size >= 8 and max_pages >= 64 else 1
     return 1
 
@@ -485,8 +505,6 @@ def plan_clustered_page_decode(
         raise ValueError("seq_lens must be a 1D tensor with one entry per request")
     if num_q_heads % num_kv_heads != 0:
         raise ValueError("num_q_heads must be divisible by num_kv_heads")
-    if (num_q_heads // num_kv_heads) > 8:
-        raise ValueError("group_size must be <= 8")
     if head_dim not in {64, 128}:
         raise ValueError("head_dim must be 64 or 128")
     if page_size not in {16, 32}:
@@ -495,18 +513,15 @@ def plan_clustered_page_decode(
     batch = int(page_table_cpu.shape[0])
     max_pages = int(_pages_per_request(seq_lens_cpu, page_size).max().item())
     group_size = num_q_heads // num_kv_heads
+    group_tile = _default_group_tile(group_size)
+    q_head_tiles = int(math.ceil(group_size / group_tile))
     effective_cluster_size = (
         _default_cluster_size(max_pages, direct_page_threshold, group_size)
         if cluster_size is None
         else int(cluster_size)
     )
-    launch_mode: Literal["direct", "clustered", "pdl_fallback"]
-    if max_pages > pdl_page_threshold:
-        launch_mode = "pdl_fallback"
-    elif effective_cluster_size > 1:
-        launch_mode = "clustered"
-    else:
-        launch_mode = "direct"
+    launch_mode: Literal["direct", "clustered"]
+    launch_mode = "clustered" if (group_size > 8 or max_pages > direct_page_threshold) else "direct"
 
     cache_key = (
         tuple(int(x) for x in seq_lens_cpu.tolist()),
@@ -516,6 +531,7 @@ def plan_clustered_page_decode(
         head_dim,
         page_size,
         layout,
+        group_tile,
         effective_cluster_size,
         direct_page_threshold,
         pdl_page_threshold,
@@ -565,6 +581,8 @@ def plan_clustered_page_decode(
         head_dim=head_dim,
         kv_layout=layout,
         max_pages=max_pages,
+        group_tile=group_tile,
+        q_head_tiles=q_head_tiles,
         cluster_size=effective_cluster_size,
         direct_page_threshold=direct_page_threshold,
         pdl_page_threshold=pdl_page_threshold,
@@ -610,9 +628,6 @@ def clustered_page_decode(
         raise ValueError("query head count must be divisible by cache.num_kv_heads")
     if head_dim != cache.head_dim:
         raise ValueError("query head_dim must match cache head_dim")
-    if (num_q_heads // cache.num_kv_heads) > 8:
-        raise ValueError("clustered_page_decode currently only supports group_size <= 8")
-
     if plan is None:
         plan = plan_clustered_page_decode(
             page_table=cache.page_table,
@@ -625,20 +640,24 @@ def clustered_page_decode(
         )
 
     effective_cluster_size = plan.cluster_size
-    if force_impl == "direct":
-        effective_cluster_size = 1
-    elif force_impl == "clustered" and effective_cluster_size == 1:
-        effective_cluster_size = 2
     if effective_cluster_size < 1:
         effective_cluster_size = 1
+    group_size = num_q_heads // cache.num_kv_heads
+    use_direct_impl = force_impl == "direct" or (
+        force_impl == "auto" and plan.launch_mode == "direct"
+    )
+    if use_direct_impl and group_size > 8:
+        raise ValueError(
+            'force_impl="direct" only supports group_size <= 8; use auto or force_impl="clustered"'
+        )
     if output is None:
         output = torch.empty_like(query)
     _check_cuda_tensor(output, name="output", dtype=torch.bfloat16, ndim=3)
     descriptor_tensors = plan.device_tensors(query.device)
     scale = softmax_scale if softmax_scale is not None else 1.0 / math.sqrt(head_dim)
-    if cache.keys_pre_rope:
+    if cache.keys_are_rotated:
         if cache.key_rope_theta is None:
-            raise ValueError("pre-rotated key caches must record key_rope_theta")
+            raise ValueError("rotated key caches must record key_rope_theta")
         if not math.isclose(
             float(cache.key_rope_theta),
             float(rope_theta),
@@ -671,9 +690,11 @@ def clustered_page_decode(
         cache.num_kv_heads,
         head_dim,
         cache.page_size,
+        plan.group_tile,
+        int(not use_direct_impl),
         effective_cluster_size,
         _layout_id(cache.kv_layout),
-        int(cache.keys_pre_rope),
+        int(cache.keys_are_rotated),
         float(scale),
         float(rope_theta),
         _current_stream_ptr(query.device),
@@ -755,7 +776,7 @@ def reference_clustered_page_decode(
             key_slice = dense_keys[request_index, kv_head_index, :seq_len, :]
             rotated_keys = (
                 key_slice
-                if cache.keys_pre_rope
+                if cache.keys_are_rotated
                 else _apply_llama_rope_torch(key_slice, positions, rope_theta)
             )
             logits = (
@@ -779,13 +800,17 @@ def estimate_page_decode_metrics(
 ) -> dict[str, float]:
     element_bytes = {"bf16_kv": 2.0, "fp8_kv": 1.0, "int8_kv": 1.0}[cache.kv_layout]
     avg_tokens = float(cache.seq_lens.to(dtype=_require_torch().float32).mean().item())
-    kv_bytes = avg_tokens * cache.num_kv_heads * cache.head_dim * 2.0 * element_bytes
+    group_size = plan.num_q_heads // plan.num_kv_heads
+    reuse_factor = float(group_size) if plan.launch_mode == "direct" else float(plan.q_head_tiles)
+    kv_bytes = avg_tokens * cache.num_kv_heads * cache.head_dim * 2.0 * element_bytes * reuse_factor
     scale_bytes = 0.0
     if cache.kv_layout != "bf16_kv":
-        scale_bytes = avg_tokens * cache.num_kv_heads * (cache.head_dim / 64.0) * 4.0
-    dsm_bytes = float(
-        plan.cluster_size * (cache.head_dim * 4) * (plan.num_q_heads // plan.num_kv_heads)
-    )
+        scale_bytes = (
+            avg_tokens * cache.num_kv_heads * (cache.head_dim / 64.0) * 4.0 * reuse_factor
+        )
+    dsm_bytes = 0.0
+    if plan.launch_mode == "clustered" and plan.cluster_size > 1:
+        dsm_bytes = float(plan.cluster_size * (cache.head_dim * 4) * group_size)
     return {
         "hbm_bytes_per_token": kv_bytes + scale_bytes,
         "workspace_bytes_per_token": 0.0,

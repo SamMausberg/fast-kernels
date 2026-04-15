@@ -55,6 +55,16 @@ head_dim = 128
 gqa_group_size = 8
 
 [[shapes]]
+name = "mqa32_long_page32"
+batch = 2
+page_size = 32
+max_seq_len = 4096
+num_q_heads = 32
+num_kv_heads = 1
+head_dim = 128
+gqa_group_size = 32
+
+[[shapes]]
 name = "gqa2_short_page32_h64"
 batch = 8
 page_size = 32

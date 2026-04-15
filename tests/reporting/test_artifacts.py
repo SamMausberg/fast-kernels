@@ -36,5 +36,7 @@ def test_result_bundle_round_trip(tmp_path: Path) -> None:
 
     write_result_bundle(tmp_path, bundle)
     loaded = load_result_bundle(tmp_path)
+    assert loaded.schema_version == 2
+    assert loaded.metadata.schema_version == 2
     assert loaded.metadata.run_id == "test-run"
     assert loaded.cases[0].case_id == "kernel-demo-fp16-row_major-shape0"

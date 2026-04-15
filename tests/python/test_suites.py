@@ -48,7 +48,8 @@ def test_clustered_page_decode_suite_loads() -> None:
         "vendor/flashinfer_clustered_page_decode",
     ]
     assert suite.layouts == ["bf16_kv", "fp8_kv", "int8_kv"]
-    assert len(suite.shapes) == 4
+    assert len(suite.shapes) == 5
+    assert any(shape.name == "mqa32_long_page32" for shape in suite.shapes)
 
 
 def test_clustered_page_decode_suite_verifies() -> None:

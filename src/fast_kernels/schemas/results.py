@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class RunMetadata(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 2
     run_id: str
     suite_id: str
     created_at: str
@@ -32,13 +32,20 @@ class BenchmarkCase(BaseModel):
     status: Literal["ok", "skipped", "not_implemented", "failed"]
     latency_us_median: float | None = None
     latency_us_p95: float | None = None
+    wall_latency_us_median: float | None = None
+    wall_latency_us_p95: float | None = None
+    device_latency_us_median: float | None = None
+    device_latency_us_p95: float | None = None
     throughput: float | None = None
+    decode_tokens_per_second: float | None = None
+    context_tokens_per_second: float | None = None
+    effective_kv_gib_per_second: float | None = None
     speedup_vs: dict[str, float] = Field(default_factory=dict)
     metrics: dict[str, float] = Field(default_factory=dict)
     reason: str | None = None
 
 
 class ResultBundle(BaseModel):
-    schema_version: int = 1
+    schema_version: int = 2
     metadata: RunMetadata
     cases: list[BenchmarkCase] = Field(default_factory=list)

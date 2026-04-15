@@ -46,9 +46,15 @@ def render_summary_markdown(bundle: ResultBundle) -> str:
             "",
             "## Cases",
             "",
-            "| case | subject | dtype | layout | shape | status | "
-            "median us | p95 us | tok/s | speedup | metrics |",
-            "| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
+            (
+                "| case | subject | dtype | layout | shape | status | "
+                "wall us | device us | p95 us | decode tok/s | "
+                "ctx tok/s | KV GiB/s | speedup | metrics |"
+            ),
+            (
+                "| --- | --- | --- | --- | --- | --- | ---: | ---: | "
+                "---: | ---: | ---: | ---: | --- | --- |"
+            ),
         ]
     )
     for case in bundle.cases:
@@ -60,9 +66,12 @@ def render_summary_markdown(bundle: ResultBundle) -> str:
             "| "
             f"`{case.case_id}` | `{case.subject_id}` | `{case.dtype}` | "
             f"`{case.layout}` | `{case.shape_name}` | `{case.status}` | "
-            f"{_format_metric(case.latency_us_median)} | "
-            f"{_format_metric(case.latency_us_p95)} | "
-            f"{_format_metric(case.throughput)} | "
+            f"{_format_metric(case.wall_latency_us_median or case.latency_us_median)} | "
+            f"{_format_metric(case.device_latency_us_median)} | "
+            f"{_format_metric(case.wall_latency_us_p95 or case.latency_us_p95)} | "
+            f"{_format_metric(case.decode_tokens_per_second or case.throughput)} | "
+            f"{_format_metric(case.context_tokens_per_second)} | "
+            f"{_format_metric(case.effective_kv_gib_per_second)} | "
             f"{speedup} | "
             f"{metrics} |"
         )

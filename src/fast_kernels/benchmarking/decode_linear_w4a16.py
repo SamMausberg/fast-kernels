@@ -110,7 +110,10 @@ def _timed_case(
         status="ok",
         latency_us_median=latency_us_median,
         latency_us_p95=latency_us_p95,
+        wall_latency_us_median=latency_us_median,
+        wall_latency_us_p95=latency_us_p95,
         throughput=throughput,
+        decode_tokens_per_second=throughput,
         speedup_vs=speedup_vs or {},
     )
 

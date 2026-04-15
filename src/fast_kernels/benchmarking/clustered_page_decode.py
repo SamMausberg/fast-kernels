@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import math
+from dataclasses import dataclass
 from functools import partial
 from statistics import median
 from time import perf_counter
@@ -21,13 +23,24 @@ from fast_kernels.schemas import BenchmarkCase, BenchmarkSuite, ShapeCase
 
 WARMUP_ITERS = 2
 TIMING_ITERS = 8
+E2E_WARMUP_ITERS = 1
+E2E_TIMING_ITERS = 3
 SubjectKind = Literal["kernel", "baseline"]
+FLASHINFER_WORKSPACE_BYTES = 128 * 1024 * 1024
 
 KERNEL_TO_IMPL = {
     "decode/clustered_page_decode_auto": "auto",
     "decode/clustered_page_decode_direct": "direct",
     "decode/clustered_page_decode_clustered": "clustered",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class TimingStats:
+    wall_latency_us_median: float
+    wall_latency_us_p95: float
+    device_latency_us_median: float
+    device_latency_us_p95: float
 
 
 def _require_torch() -> Any:
@@ -103,9 +116,10 @@ def _timed_case(
     layout: str,
     shape_name: str,
     dimensions: dict[str, int],
-    latency_us_median: float,
-    latency_us_p95: float,
-    throughput: float,
+    timing: TimingStats,
+    decode_tokens_per_second: float,
+    context_tokens_per_second: float,
+    effective_kv_gib_per_second: float,
     speedup_vs: dict[str, float],
     metrics: dict[str, float],
 ) -> BenchmarkCase:
@@ -118,9 +132,16 @@ def _timed_case(
         shape_name=shape_name,
         dimensions=dimensions,
         status="ok",
-        latency_us_median=latency_us_median,
-        latency_us_p95=latency_us_p95,
-        throughput=throughput,
+        latency_us_median=timing.wall_latency_us_median,
+        latency_us_p95=timing.wall_latency_us_p95,
+        wall_latency_us_median=timing.wall_latency_us_median,
+        wall_latency_us_p95=timing.wall_latency_us_p95,
+        device_latency_us_median=timing.device_latency_us_median,
+        device_latency_us_p95=timing.device_latency_us_p95,
+        throughput=decode_tokens_per_second,
+        decode_tokens_per_second=decode_tokens_per_second,
+        context_tokens_per_second=context_tokens_per_second,
+        effective_kv_gib_per_second=effective_kv_gib_per_second,
         speedup_vs=speedup_vs,
         metrics=metrics,
     )
@@ -132,39 +153,56 @@ def _p95(values: list[float]) -> float:
     return ordered[index]
 
 
-def _time_callable(fn: Any, torch: Any) -> tuple[float, float]:
+def _time_callable(
+    fn: Any,
+    torch: Any,
+    *,
+    warmup_iters: int = WARMUP_ITERS,
+    timing_iters: int = TIMING_ITERS,
+) -> TimingStats:
     torch.cuda.synchronize()
-    for _ in range(WARMUP_ITERS):
+    for _ in range(warmup_iters):
         fn()
     torch.cuda.synchronize()
 
-    samples_us: list[float] = []
-    for _ in range(TIMING_ITERS):
+    wall_samples_us: list[float] = []
+    device_samples_us: list[float] = []
+    for _ in range(timing_iters):
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
         torch.cuda.synchronize()
-        start = perf_counter()
+        wall_start = perf_counter()
+        start_event.record()
         fn()
-        torch.cuda.synchronize()
-        samples_us.append((perf_counter() - start) * 1_000_000.0)
+        end_event.record()
+        end_event.synchronize()
+        wall_samples_us.append((perf_counter() - wall_start) * 1_000_000.0)
+        device_samples_us.append(float(start_event.elapsed_time(end_event) * 1_000.0))
 
-    return float(median(samples_us)), _p95(samples_us)
+    return TimingStats(
+        wall_latency_us_median=float(median(wall_samples_us)),
+        wall_latency_us_p95=_p95(wall_samples_us),
+        device_latency_us_median=float(median(device_samples_us)),
+        device_latency_us_p95=_p95(device_samples_us),
+    )
 
 
 def _case_seed(shape: ShapeCase, layout: str) -> int:
-    return (
-        hash(
-            (
+    digest = hashlib.sha256(
+        "|".join(
+            [
                 shape.name,
-                shape.batch,
-                shape.require_dimension("max_seq_len"),
-                shape.require_dimension("num_q_heads"),
-                shape.require_dimension("num_kv_heads"),
-                shape.require_dimension("head_dim"),
-                shape.require_dimension("page_size"),
+                str(shape.batch),
+                str(shape.require_dimension("max_seq_len")),
+                str(shape.require_dimension("num_q_heads")),
+                str(shape.require_dimension("num_kv_heads")),
+                str(shape.require_dimension("head_dim")),
+                str(shape.require_dimension("page_size")),
                 layout,
-            )
-        )
-        & 0x7FFFFFFF
-    )
+            ]
+        ).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:4], byteorder="little") & 0x7FFFFFFF
 
 
 def _make_inputs(torch: Any, shape: ShapeCase, layout: str) -> tuple[Any, Any, Any, Any]:
@@ -218,12 +256,167 @@ def _max_abs_diff(actual: Any, expected: Any) -> float:
     return float((actual.to(torch.float32) - expected.to(torch.float32)).abs().max().item())
 
 
-def _throughput_tokens_per_second(batch: int, latency_us: float) -> float:
+def _decode_tokens_per_second(batch: int, latency_us: float) -> float:
     return (batch * 1_000_000.0) / latency_us
+
+
+def _context_tokens_per_second(seq_lens: Any, latency_us: float) -> float:
+    total_context_tokens = float(seq_lens.to(dtype=_require_torch().float32).sum().item())
+    return (total_context_tokens * 1_000_000.0) / latency_us
+
+
+def _effective_kv_gib_per_second(
+    hbm_bytes_per_decode_token: float,
+    decode_tokens_per_second: float,
+) -> float:
+    return (hbm_bytes_per_decode_token * decode_tokens_per_second) / float(1024**3)
 
 
 def _flashinfer_available() -> bool:
     return importlib.util.find_spec("flashinfer") is not None
+
+
+def _flashinfer_skip_reason(cache: Any) -> str | None:
+    if cache.kv_layout != "bf16_kv":
+        return (
+            "FlashInfer baseline currently supports only bf16_kv; this repo's fp8/int8 paged "
+            "cache formats use block-scaled layouts that are not wired into the adapter yet."
+        )
+    if cache.keys_are_rotated:
+        return (
+            "FlashInfer baseline currently expects unrotated key pages so it can apply "
+            "ROPE_LLAMA inside the decode kernel."
+        )
+    if int(cache.seq_lens.min().item()) <= 0:
+        return "FlashInfer baseline currently skips empty-sequence decode cases."
+    return None
+
+
+def _flashinfer_page_metadata(cache: Any, device: Any) -> tuple[Any, Any, Any]:
+    torch = _require_torch()
+    seq_lens_cpu = cache.seq_lens.to(device="cpu", dtype=torch.int32).contiguous()
+    pages_per_request = ((seq_lens_cpu + (cache.page_size - 1)) // cache.page_size).to(torch.int32)
+    indptr_cpu = torch.empty((int(seq_lens_cpu.shape[0]) + 1,), dtype=torch.int32)
+    indptr_cpu[0] = 0
+    indptr_cpu[1:] = torch.cumsum(pages_per_request, dim=0)
+
+    page_slices = []
+    for request_index, num_pages in enumerate(pages_per_request.tolist()):
+        if num_pages <= 0:
+            continue
+        page_slices.append(
+            cache.page_table[request_index, :num_pages].to(device="cpu", dtype=torch.int32)
+        )
+    flat_indices_cpu = (
+        torch.cat(page_slices, dim=0).contiguous()
+        if page_slices
+        else torch.empty((0,), dtype=torch.int32)
+    )
+    last_page_len_cpu = torch.where(
+        seq_lens_cpu > 0,
+        ((seq_lens_cpu - 1) % cache.page_size) + 1,
+        torch.zeros_like(seq_lens_cpu),
+    )
+    return (
+        indptr_cpu.to(device=device, dtype=torch.int32),
+        flat_indices_cpu.to(device=device, dtype=torch.int32),
+        last_page_len_cpu.to(device=device, dtype=torch.int32),
+    )
+
+
+def _make_flashinfer_decode_fn(
+    query: Any,
+    cache: Any,
+    *,
+    softmax_scale: float,
+    rope_theta: float,
+) -> Any:
+    torch = _require_torch()
+    if torch is None:
+        raise RuntimeError("PyTorch is required for the FlashInfer baseline.")
+    try:
+        import flashinfer  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover - exercised only when flashinfer is absent
+        raise RuntimeError("FlashInfer is not installed.") from exc
+
+    skip_reason = _flashinfer_skip_reason(cache)
+    if skip_reason is not None:
+        raise NotImplementedError(skip_reason)
+
+    indptr, indices, last_page_len = _flashinfer_page_metadata(cache, query.device)
+    workspace = torch.zeros(FLASHINFER_WORKSPACE_BYTES, dtype=torch.uint8, device=query.device)
+    wrapper = flashinfer.decode.BatchDecodeWithPagedKVCacheWrapper(
+        workspace,
+        kv_layout="HND",
+        use_tensor_cores=(int(query.shape[1]) // cache.num_kv_heads) > 1,
+        backend="auto",
+    )
+    wrapper.plan(
+        indptr,
+        indices,
+        last_page_len,
+        int(query.shape[1]),
+        cache.num_kv_heads,
+        cache.head_dim,
+        cache.page_size,
+        pos_encoding_mode="ROPE_LLAMA",
+        q_data_type=query.dtype,
+        kv_data_type=cache.key_pages.dtype,
+        o_data_type=query.dtype,
+        sm_scale=float(softmax_scale),
+        rope_theta=float(rope_theta),
+    )
+    paged_kv_cache = (cache.key_pages, cache.value_pages)
+    return partial(wrapper.run, query, paged_kv_cache)
+
+
+def _make_repo_e2e_decode_fn(
+    query: Any,
+    cache: Any,
+    *,
+    force_impl: str,
+    softmax_scale: float,
+    rope_theta: float,
+) -> Any:
+    def _run() -> Any:
+        plan = plan_clustered_page_decode(
+            page_table=cache.page_table,
+            seq_lens=cache.seq_lens,
+            num_q_heads=int(query.shape[1]),
+            num_kv_heads=cache.num_kv_heads,
+            head_dim=cache.head_dim,
+            page_size=cache.page_size,
+            kv_layout=cache.kv_layout,
+            use_cache=False,
+        )
+        return clustered_page_decode(
+            query,
+            cache,
+            plan=plan,
+            softmax_scale=softmax_scale,
+            rope_theta=rope_theta,
+            force_impl=force_impl,
+        )
+
+    return _run
+
+
+def _make_flashinfer_e2e_decode_fn(
+    query: Any,
+    cache: Any,
+    *,
+    softmax_scale: float,
+    rope_theta: float,
+) -> Any:
+    def _run() -> Any:
+        return _make_flashinfer_decode_fn(
+            query,
+            cache,
+            softmax_scale=softmax_scale,
+            rope_theta=rope_theta,
+        )()
+
+    return _run
 
 
 def run_clustered_page_decode_suite(
@@ -233,6 +426,8 @@ def run_clustered_page_decode_suite(
     notes = [
         "Clustered page decode benchmarks use repo-native paged caches and "
         "Blackwell-first heuristics.",
+        "Primary timings are steady-state decode-step measurements with warmed plans/wrappers.",
+        "decode tok/s is batch / step latency; context tok/s is sum(seq_lens) / step latency.",
         "FlashInfer remains optional; the baseline is skipped when the runtime is unavailable.",
     ]
     if torch is None:
@@ -335,18 +530,37 @@ def run_clustered_page_decode_suite(
                     page_size=shape.require_dimension("page_size"),
                     kv_layout=layout,
                 )
+                softmax_scale = 1.0 / math.sqrt(cache.head_dim)
+                hbm_bytes_per_decode_token = estimate_page_decode_metrics(cache, plan)[
+                    "hbm_bytes_per_token"
+                ]
                 reference_output = reference_clustered_page_decode(query, cache)
                 reference_fn = partial(
                     reference_clustered_page_decode,
                     query,
                     cache,
                 )
-                reference_latency_us, reference_p95_us = _time_callable(reference_fn, torch)
-                reference_throughput = _throughput_tokens_per_second(
-                    shape.batch, reference_latency_us
+                reference_timing = _time_callable(reference_fn, torch)
+                reference_decode_toks = _decode_tokens_per_second(
+                    shape.batch, reference_timing.wall_latency_us_median
+                )
+                reference_context_toks = _context_tokens_per_second(
+                    cache.seq_lens, reference_timing.wall_latency_us_median
                 )
                 reference_metrics = estimate_page_decode_metrics(cache, plan)
                 reference_metrics["max_abs_error"] = 0.0
+                reference_metrics["e2e_wall_latency_us_median"] = (
+                    reference_timing.wall_latency_us_median
+                )
+                reference_metrics["e2e_wall_latency_us_p95"] = reference_timing.wall_latency_us_p95
+                reference_metrics["e2e_device_latency_us_median"] = (
+                    reference_timing.device_latency_us_median
+                )
+                reference_metrics["e2e_device_latency_us_p95"] = (
+                    reference_timing.device_latency_us_p95
+                )
+                reference_metrics["e2e_decode_tokens_per_second"] = reference_decode_toks
+                reference_metrics["e2e_context_tokens_per_second"] = reference_context_toks
 
                 for kernel_id in suite.kernels.ids:
                     force_impl = KERNEL_TO_IMPL[kernel_id]
@@ -370,9 +584,39 @@ def run_clustered_page_decode_suite(
                             plan=plan,
                             force_impl=force_impl,
                         )
-                        latency_us, p95_us = _time_callable(fn, torch)
+                        timing = _time_callable(fn, torch)
+                        e2e_timing = _time_callable(
+                            _make_repo_e2e_decode_fn(
+                                query,
+                                cache,
+                                force_impl=force_impl,
+                                softmax_scale=softmax_scale,
+                                rope_theta=10000.0,
+                            ),
+                            torch,
+                            warmup_iters=E2E_WARMUP_ITERS,
+                            timing_iters=E2E_TIMING_ITERS,
+                        )
+                        decode_toks = _decode_tokens_per_second(
+                            shape.batch, timing.wall_latency_us_median
+                        )
+                        context_toks = _context_tokens_per_second(
+                            cache.seq_lens, timing.wall_latency_us_median
+                        )
                         metrics = estimate_page_decode_metrics(cache, plan)
                         metrics["max_abs_error"] = _max_abs_diff(kernel_output, reference_output)
+                        metrics["e2e_wall_latency_us_median"] = e2e_timing.wall_latency_us_median
+                        metrics["e2e_wall_latency_us_p95"] = e2e_timing.wall_latency_us_p95
+                        metrics["e2e_device_latency_us_median"] = (
+                            e2e_timing.device_latency_us_median
+                        )
+                        metrics["e2e_device_latency_us_p95"] = e2e_timing.device_latency_us_p95
+                        metrics["e2e_decode_tokens_per_second"] = _decode_tokens_per_second(
+                            shape.batch, e2e_timing.wall_latency_us_median
+                        )
+                        metrics["e2e_context_tokens_per_second"] = _context_tokens_per_second(
+                            cache.seq_lens, e2e_timing.wall_latency_us_median
+                        )
                         cases.append(
                             _timed_case(
                                 subject_kind="kernel",
@@ -381,12 +625,16 @@ def run_clustered_page_decode_suite(
                                 layout=layout,
                                 shape_name=shape.name,
                                 dimensions=dimensions,
-                                latency_us_median=latency_us,
-                                latency_us_p95=p95_us,
-                                throughput=_throughput_tokens_per_second(shape.batch, latency_us),
+                                timing=timing,
+                                decode_tokens_per_second=decode_toks,
+                                context_tokens_per_second=context_toks,
+                                effective_kv_gib_per_second=_effective_kv_gib_per_second(
+                                    hbm_bytes_per_decode_token, decode_toks
+                                ),
                                 speedup_vs={
                                     "torch/reference_clustered_page_decode": (
-                                        reference_latency_us / latency_us
+                                        reference_timing.wall_latency_us_median
+                                        / timing.wall_latency_us_median
                                     )
                                 },
                                 metrics=metrics,
@@ -413,29 +661,125 @@ def run_clustered_page_decode_suite(
                         layout=layout,
                         shape_name=shape.name,
                         dimensions=dimensions,
-                        latency_us_median=reference_latency_us,
-                        latency_us_p95=reference_p95_us,
-                        throughput=reference_throughput,
+                        timing=reference_timing,
+                        decode_tokens_per_second=reference_decode_toks,
+                        context_tokens_per_second=reference_context_toks,
+                        effective_kv_gib_per_second=_effective_kv_gib_per_second(
+                            hbm_bytes_per_decode_token, reference_decode_toks
+                        ),
                         speedup_vs={},
                         metrics=reference_metrics,
                     )
                 )
 
                 if _flashinfer_available():
-                    cases.append(
-                        _skipped_case(
-                            subject_kind="baseline",
-                            subject_id="vendor/flashinfer_clustered_page_decode",
-                            dtype=dtype,
-                            layout=layout,
-                            shape_name=shape.name,
-                            dimensions=dimensions,
-                            reason=(
-                                "FlashInfer is installed, but this repo still needs a "
-                                "version-locked adapter for the local runtime build."
-                            ),
+                    skip_reason = _flashinfer_skip_reason(cache)
+                    if skip_reason is not None:
+                        cases.append(
+                            _skipped_case(
+                                subject_kind="baseline",
+                                subject_id="vendor/flashinfer_clustered_page_decode",
+                                dtype=dtype,
+                                layout=layout,
+                                shape_name=shape.name,
+                                dimensions=dimensions,
+                                reason=skip_reason,
+                            )
                         )
-                    )
+                    else:
+                        try:
+                            vendor_fn = _make_flashinfer_decode_fn(
+                                query,
+                                cache,
+                                softmax_scale=softmax_scale,
+                                rope_theta=10000.0,
+                            )
+                            vendor_output = vendor_fn()
+                            torch.testing.assert_close(
+                                vendor_output,
+                                reference_output,
+                                atol=suite.tolerances.atol,
+                                rtol=suite.tolerances.rtol,
+                            )
+                            vendor_timing = _time_callable(vendor_fn, torch)
+                            vendor_e2e_timing = _time_callable(
+                                _make_flashinfer_e2e_decode_fn(
+                                    query,
+                                    cache,
+                                    softmax_scale=softmax_scale,
+                                    rope_theta=10000.0,
+                                ),
+                                torch,
+                                warmup_iters=E2E_WARMUP_ITERS,
+                                timing_iters=E2E_TIMING_ITERS,
+                            )
+                            vendor_decode_toks = _decode_tokens_per_second(
+                                shape.batch, vendor_timing.wall_latency_us_median
+                            )
+                            vendor_context_toks = _context_tokens_per_second(
+                                cache.seq_lens, vendor_timing.wall_latency_us_median
+                            )
+                            vendor_metrics = dict(reference_metrics)
+                            vendor_metrics["max_abs_error"] = _max_abs_diff(
+                                vendor_output, reference_output
+                            )
+                            vendor_metrics["e2e_wall_latency_us_median"] = (
+                                vendor_e2e_timing.wall_latency_us_median
+                            )
+                            vendor_metrics["e2e_wall_latency_us_p95"] = (
+                                vendor_e2e_timing.wall_latency_us_p95
+                            )
+                            vendor_metrics["e2e_device_latency_us_median"] = (
+                                vendor_e2e_timing.device_latency_us_median
+                            )
+                            vendor_metrics["e2e_device_latency_us_p95"] = (
+                                vendor_e2e_timing.device_latency_us_p95
+                            )
+                            vendor_metrics["e2e_decode_tokens_per_second"] = (
+                                _decode_tokens_per_second(
+                                    shape.batch, vendor_e2e_timing.wall_latency_us_median
+                                )
+                            )
+                            vendor_metrics["e2e_context_tokens_per_second"] = (
+                                _context_tokens_per_second(
+                                    cache.seq_lens, vendor_e2e_timing.wall_latency_us_median
+                                )
+                            )
+                            cases.append(
+                                _timed_case(
+                                    subject_kind="baseline",
+                                    subject_id="vendor/flashinfer_clustered_page_decode",
+                                    dtype=dtype,
+                                    layout=layout,
+                                    shape_name=shape.name,
+                                    dimensions=dimensions,
+                                    timing=vendor_timing,
+                                    decode_tokens_per_second=vendor_decode_toks,
+                                    context_tokens_per_second=vendor_context_toks,
+                                    effective_kv_gib_per_second=_effective_kv_gib_per_second(
+                                        hbm_bytes_per_decode_token, vendor_decode_toks
+                                    ),
+                                    speedup_vs={
+                                        "torch/reference_clustered_page_decode": (
+                                            reference_timing.wall_latency_us_median
+                                            / vendor_timing.wall_latency_us_median
+                                        )
+                                    },
+                                    metrics=vendor_metrics,
+                                )
+                            )
+                        except Exception as exc:
+                            cases.append(
+                                _failed_case(
+                                    subject_kind="baseline",
+                                    subject_id="vendor/flashinfer_clustered_page_decode",
+                                    dtype=dtype,
+                                    layout=layout,
+                                    shape_name=shape.name,
+                                    dimensions=dimensions,
+                                    reason=str(exc),
+                                )
+                            )
                 else:
                     cases.append(
                         _skipped_case(
