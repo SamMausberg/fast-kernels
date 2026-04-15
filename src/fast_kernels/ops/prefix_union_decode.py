@@ -25,7 +25,7 @@ from fast_kernels.ops.clustered_page_decode import (
 FORCE_IMPLS = {"auto", "union", "fallback"}
 DEFAULT_MIN_SHARED_PAGES = 2
 DEFAULT_MIN_CONSUMERS = 2
-_PLAN_CACHE: dict[tuple[Any, ...], "PrefixUnionDecodePlan"] = {}
+_PLAN_CACHE: dict[tuple[Any, ...], PrefixUnionDecodePlan] = {}
 
 
 @dataclass(slots=True)
@@ -93,7 +93,7 @@ def _request_page_lists(
     batch = int(page_table_cpu.shape[0])
     for request_index in range(batch):
         seq_len = int(seq_lens_cpu[request_index].item())
-        num_pages = int(((seq_len + (page_size - 1)) // page_size))
+        num_pages = int((seq_len + (page_size - 1)) // page_size)
         pages = tuple(int(v) for v in page_table_cpu[request_index, :num_pages].tolist())
         valid_tokens = [
             page_size if page_slot < (num_pages - 1) else max(0, seq_len - (page_slot * page_size))
@@ -148,7 +148,7 @@ def _is_blackwell_device() -> bool:
     torch = _require_torch()
     if not torch.cuda.is_available():
         return False
-    major, _minor = torch.cuda.get_device_capability(torch.device("cuda"))
+    major = int(torch.cuda.get_device_capability(torch.device("cuda"))[0])
     return major >= 12
 
 
@@ -365,7 +365,8 @@ def prefix_union_decode(
         ("value_scales", cache.value_scales),
     )
 
-    batch, num_q_heads, head_dim = (int(query.shape[0]), int(query.shape[1]), int(query.shape[2]))
+    num_q_heads = int(query.shape[1])
+    head_dim = int(query.shape[2])
     if num_q_heads % cache.num_kv_heads != 0:
         raise ValueError("query head count must be divisible by cache.num_kv_heads")
     if head_dim != cache.head_dim:
@@ -392,7 +393,10 @@ def prefix_union_decode(
     )
     if use_union_impl:
         if not cache.keys_are_rotated:
-            raise ValueError("prefix_union_decode requires pre-rotated key pages for the union path")
+            raise ValueError(
+                "prefix_union_decode requires pre-rotated key pages "
+                "for the union path"
+            )
         if cache.key_rope_theta is None:
             raise ValueError("rotated key caches must record key_rope_theta")
         if not math.isclose(

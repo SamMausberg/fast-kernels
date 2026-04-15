@@ -105,19 +105,39 @@ def _make_inputs(torch: Any, shape: ShapeCase, layout: str) -> tuple[Any, Any, A
 
 
 def _build_cache(keys: Any, values: Any, seq_lens: Any, *, page_size: int, layout: str) -> Any:
-    common_kwargs = dict(
-        page_size=page_size,
-        fragment_pages=True,
-        seed=11,
-        key_rope_theta=ROPE_THETA,
-        deduplicate_identical_pages=True,
-    )
     if layout == "bf16_kv":
-        return pack_paged_kv_bf16(keys, values, seq_lens, **common_kwargs)
+        return pack_paged_kv_bf16(
+            keys,
+            values,
+            seq_lens,
+            page_size=page_size,
+            fragment_pages=True,
+            seed=11,
+            key_rope_theta=ROPE_THETA,
+            deduplicate_identical_pages=True,
+        )
     if layout == "fp8_kv":
-        return quantize_paged_kv_fp8(keys, values, seq_lens, **common_kwargs)
+        return quantize_paged_kv_fp8(
+            keys,
+            values,
+            seq_lens,
+            page_size=page_size,
+            fragment_pages=True,
+            seed=11,
+            key_rope_theta=ROPE_THETA,
+            deduplicate_identical_pages=True,
+        )
     if layout == "int8_kv":
-        return quantize_paged_kv_int8(keys, values, seq_lens, **common_kwargs)
+        return quantize_paged_kv_int8(
+            keys,
+            values,
+            seq_lens,
+            page_size=page_size,
+            fragment_pages=True,
+            seed=11,
+            key_rope_theta=ROPE_THETA,
+            deduplicate_identical_pages=True,
+        )
     raise ValueError(f"unsupported layout: {layout}")
 
 
@@ -157,17 +177,21 @@ def run_prefix_union_decode_suite(
 ) -> tuple[list[BenchmarkCase], list[str]]:
     torch = _require_torch()
     notes = [
-        "Prefix-union decode benchmarks build deduplicated paged KV caches with shared physical prefixes.",
+        (
+            "Prefix-union decode benchmarks build deduplicated paged KV caches "
+            "with shared physical prefixes."
+        ),
         "Union mode requires pre-rotated key pages and a Blackwell-class GPU.",
         "Fallback timings route through the existing clustered_page_decode implementation.",
     ]
+    registry_groups: tuple[tuple[SubjectKind, list[str]], ...] = (
+        ("kernel", suite.kernels.ids),
+        ("baseline", suite.baselines.ids),
+    )
     if torch is None:
         notes.append("PyTorch is unavailable, so all prefix_union_decode cases were skipped.")
         skipped_cases: list[BenchmarkCase] = []
-        for subject_kind, subject_ids in (
-            ("kernel", suite.kernels.ids),
-            ("baseline", suite.baselines.ids),
-        ):
+        for subject_kind, subject_ids in registry_groups:
             for subject_id in subject_ids:
                 for dtype in suite.dtypes:
                     for layout in suite.layouts:
@@ -180,7 +204,10 @@ def run_prefix_union_decode_suite(
                                     layout=layout,
                                     shape_name=shape.name,
                                     dimensions=shape.dimensions(),
-                                    reason="PyTorch is required for prefix_union_decode benchmarks.",
+                                    reason=(
+                                        "PyTorch is required for "
+                                        "prefix_union_decode benchmarks."
+                                    ),
                                 )
                             )
         return skipped_cases, notes
@@ -188,10 +215,7 @@ def run_prefix_union_decode_suite(
     if not torch.cuda.is_available() or not cuda_prefix_union_decode_available():
         notes.append("CUDA or the native CUDA extension is unavailable, so all cases were skipped.")
         skipped_cases = []
-        for subject_kind, subject_ids in (
-            ("kernel", suite.kernels.ids),
-            ("baseline", suite.baselines.ids),
-        ):
+        for subject_kind, subject_ids in registry_groups:
             for subject_id in subject_ids:
                 for dtype in suite.dtypes:
                     for layout in suite.layouts:
@@ -204,7 +228,10 @@ def run_prefix_union_decode_suite(
                                     layout=layout,
                                     shape_name=shape.name,
                                     dimensions=shape.dimensions(),
-                                    reason="CUDA, PyTorch, and a CUDA-enabled native build are required.",
+                                    reason=(
+                                        "CUDA, PyTorch, and a CUDA-enabled "
+                                        "native build are required."
+                                    ),
                                 )
                             )
         return skipped_cases, notes
@@ -237,10 +264,7 @@ def run_prefix_union_decode_suite(
                     )
                 except Exception as exc:
                     reason = f"cache build or planning failed: {exc}"
-                    for subject_kind, subject_ids in (
-                        ("kernel", suite.kernels.ids),
-                        ("baseline", suite.baselines.ids),
-                    ):
+                    for subject_kind, subject_ids in registry_groups:
                         for subject_id in subject_ids:
                             cases.append(
                                 _failed_case(
