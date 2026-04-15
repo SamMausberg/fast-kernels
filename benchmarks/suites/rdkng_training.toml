@@ -18,6 +18,7 @@ seed = 29
 
 [metadata.rdkng]
 steps = 4
+warmup_steps = 1
 basis_rank = 8
 hybrid_cg_iters = 4
 cg_reference_iters = 8

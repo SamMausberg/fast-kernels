@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass
+from importlib import import_module
 from statistics import median
 from time import perf_counter
 from typing import Any, Literal
@@ -23,13 +24,13 @@ def _require_torch() -> Any:
 
 def _require_galore_torch() -> Any:
     try:
-        from galore_torch import GaLoreAdamW
-        from galore_torch.galore_projector import GaLoreProjector
+        galore_torch = import_module("galore_torch")
+        galore_projector = import_module("galore_torch.galore_projector")
     except ImportError:
         return None
     return {
-        "GaLoreAdamW": GaLoreAdamW,
-        "GaLoreProjector": GaLoreProjector,
+        "GaLoreAdamW": galore_torch.GaLoreAdamW,
+        "GaLoreProjector": galore_projector.GaLoreProjector,
     }
 
 
@@ -484,6 +485,7 @@ class _BlockConfig:
 @dataclass(slots=True)
 class _TrainingConfig:
     steps: int
+    warmup_steps: int
     basis_rank: int
     hybrid_cg_iters: int
     cg_reference_iters: int
@@ -525,6 +527,7 @@ def _parse_training_config(suite: BenchmarkSuite) -> _TrainingConfig:
     raw = dict(suite.metadata.get("rdkng", {}))
     return _TrainingConfig(
         steps=int(raw.get("steps", 6)),
+        warmup_steps=int(raw.get("warmup_steps", 1)),
         basis_rank=int(raw.get("basis_rank", 8)),
         hybrid_cg_iters=int(raw.get("hybrid_cg_iters", 4)),
         cg_reference_iters=int(raw.get("cg_reference_iters", 8)),
@@ -756,14 +759,14 @@ def _build_tiny_transformer(torch: Any, config: _TrainingConfig, *, device: Any,
     import torch.nn as nn
     import torch.nn.functional as functional
 
-    class _TinyMLPModule(nn.Module):
+    class _TinyMLPModule(nn.Module):  # type: ignore[misc, unused-ignore]
         def __init__(self) -> None:
             super().__init__()
             self.up_proj = nn.Linear(config.d_model, config.d_ff, bias=False)
             self.down_proj = nn.Linear(config.d_ff, config.d_model, bias=False)
             self.activation = functional.gelu
 
-    class _TinyBlock(nn.Module):
+    class _TinyBlock(nn.Module):  # type: ignore[misc, unused-ignore]
         def __init__(self) -> None:
             super().__init__()
             self.ln1 = nn.LayerNorm(config.d_model)
@@ -787,7 +790,7 @@ def _build_tiny_transformer(torch: Any, config: _TrainingConfig, *, device: Any,
             x = x + self.out_proj(attn)
             return x + self.mlp(self.ln2(x), capture=capture)
 
-    class _TinyModel(nn.Module):
+    class _TinyModel(nn.Module):  # type: ignore[misc, unused-ignore]
         def __init__(self) -> None:
             super().__init__()
             self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
@@ -873,7 +876,7 @@ def _training_step_trajectory(
         dim=(1, 2)
     )
     loss = loss_per_sample.mean()
-    loss.backward()
+    loss.backward()  # type: ignore[no-untyped-call, unused-ignore]
     up_input = student.block.mlp.last_input.detach().float()
     up_grad = (student.block.mlp.last_output.grad.detach().float() * batch_size)
     per_sample_grads = torch.einsum("bto,bti->boi", up_grad, up_input).reshape(batch_size, -1)
@@ -887,7 +890,7 @@ def _training_step_trajectory(
             y_f32=y_f32,
             grad=grad,
             reference=reference,
-            matrix_shape=tuple(int(dim) for dim in trainable.shape),
+            matrix_shape=(int(trainable.shape[0]), int(trainable.shape[1])),
         ),
         float(loss.item()),
     )
@@ -982,7 +985,8 @@ def _run_training_subject(
     target_loss: float | None = None
     elapsed_to_target_s: float | None = None
     cumulative_time_s = 0.0
-    for step_idx in range(config.steps):
+    total_steps = config.steps + config.warmup_steps
+    for step_idx in range(total_steps):
         tokens = _make_training_batch(
             torch,
             batch_size=batch_size,
@@ -1011,6 +1015,8 @@ def _run_training_subject(
                 )
         torch.cuda.synchronize()
         elapsed_s = perf_counter() - start
+        if step_idx < config.warmup_steps:
+            continue
         cumulative_time_s += elapsed_s
         latencies_us.append(elapsed_s * 1_000_000.0)
         losses.append(loss_value)
@@ -1209,7 +1215,7 @@ def run_rdkng_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[st
                                     )
                                 )
     elif suite.id == "rdkng_training":
-        config = _parse_training_config(suite)
+        training_config = _parse_training_config(suite)
         notes.append(
             "Training mode runs a tiny teacher-student transformer and only updates the MLP "
             "up-projection block with each subject's direction."
@@ -1231,7 +1237,7 @@ def run_rdkng_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[st
                                         dtype=dtype,
                                         layout=layout,
                                         shape=shape,
-                                        config=config,
+                                        config=training_config,
                                         device=device,
                                         seed=base_seed + (shape_index * 101),
                                     )
