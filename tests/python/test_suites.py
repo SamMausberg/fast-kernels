@@ -55,3 +55,23 @@ def test_clustered_page_decode_suite_loads() -> None:
 def test_clustered_page_decode_suite_verifies() -> None:
     suite = load_suite(Path("benchmarks/suites/clustered_page_decode.toml"))
     assert verify_suite(suite) == []
+
+
+def test_prefix_union_decode_suite_loads() -> None:
+    suite = load_suite(Path("benchmarks/suites/prefix_union_decode.toml"))
+    assert suite.id == "prefix_union_decode"
+    assert suite.family == "prefix_union_decode"
+    assert suite.kernels.ids == [
+        "decode/prefix_union_decode_auto",
+        "decode/prefix_union_decode_union",
+        "decode/prefix_union_decode_fallback",
+    ]
+    assert suite.baselines.ids == ["torch/reference_prefix_union_decode"]
+    assert suite.layouts == ["bf16_kv", "fp8_kv", "int8_kv"]
+    assert len(suite.shapes) == 4
+    assert any(shape.name == "mqa8_prefix8_page32" for shape in suite.shapes)
+
+
+def test_prefix_union_decode_suite_verifies() -> None:
+    suite = load_suite(Path("benchmarks/suites/prefix_union_decode.toml"))
+    assert verify_suite(suite) == []

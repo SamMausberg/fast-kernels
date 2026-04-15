@@ -11,6 +11,14 @@ from fast_kernels.ops.clustered_page_decode import (
     quantize_paged_kv_int8,
     reference_clustered_page_decode,
 )
+from fast_kernels.ops.prefix_union_decode import (
+    PrefixUnionDecodePlan,
+    cuda_prefix_union_decode_available,
+    estimate_prefix_union_decode_metrics,
+    plan_prefix_union_decode,
+    prefix_union_decode,
+    reference_prefix_union_decode,
+)
 from fast_kernels.ops.decode_quant_linear import (
     arc_packet_stride_bytes,
     arc_w4a16_forward,
@@ -25,6 +33,7 @@ from fast_kernels.ops.decode_quant_linear import (
 __all__ = [
     "ClusteredPageDecodePlan",
     "PagedKVCache",
+    "PrefixUnionDecodePlan",
     "arc_packet_stride_bytes",
     "arc_w4a16_supported_impls",
     "arc_w4a16_forward",
@@ -32,14 +41,19 @@ __all__ = [
     "clustered_page_decode",
     "cuda_clustered_decode_available",
     "cuda_decode_available",
+    "cuda_prefix_union_decode_available",
     "dequant_w4a16_to_fp16",
     "estimate_page_decode_metrics",
+    "estimate_prefix_union_decode_metrics",
     "group_size_for_layout",
     "materialize_reference_dense_kv",
     "pack_arc_w4a16_packets",
     "pack_paged_kv_bf16",
     "plan_clustered_page_decode",
+    "plan_prefix_union_decode",
+    "prefix_union_decode",
     "quantize_paged_kv_fp8",
     "quantize_paged_kv_int8",
     "reference_clustered_page_decode",
+    "reference_prefix_union_decode",
 ]

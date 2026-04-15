@@ -53,4 +53,12 @@ def baseline_registry() -> dict[str, BaselineSpec]:
             ),
             maturity="experimental",
         ),
+        "torch/reference_prefix_union_decode": BaselineSpec(
+            baseline_id="torch/reference_prefix_union_decode",
+            source="framework",
+            description=(
+                "Torch exact paged decode reference used to validate prefix-union decode results."
+            ),
+            maturity="experimental",
+        ),
     }

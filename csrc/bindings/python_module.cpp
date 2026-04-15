@@ -5,6 +5,7 @@
 
 #include "ops/clustered_page_decode/clustered_page_decode.h"
 #include "ops/decode_quant_linear/arc_w4a16.h"
+#include "ops/prefix_union_decode/prefix_union_decode.h"
 
 namespace py = pybind11;
 
@@ -48,6 +49,31 @@ PYBIND11_MODULE(_native, m) {
       py::arg("batch"), py::arg("num_runs"), py::arg("num_q_heads"), py::arg("num_kv_heads"),
       py::arg("head_dim"), py::arg("page_size"), py::arg("group_tile"),
       py::arg("use_clustered_kernel"), py::arg("cluster_size"), py::arg("kv_format"),
+      py::arg("keys_are_rotated"), py::arg("softmax_scale"), py::arg("rope_theta"),
+      py::arg("stream_ptr"));
+  m.def(
+      "prefix_union_decode_forward",
+      [](std::uintptr_t query_ptr, std::uintptr_t key_ptr, std::uintptr_t value_ptr,
+         std::uintptr_t key_scales_ptr, std::uintptr_t value_scales_ptr,
+         std::uintptr_t tasks_ptr, std::uintptr_t shared_pages_ptr,
+         std::uintptr_t tail_pages_ptr, std::uintptr_t consumers_ptr,
+         std::uintptr_t scheduler_counter_ptr, std::uintptr_t output_ptr, int num_tasks,
+         int num_pages, int num_q_heads, int num_kv_heads, int head_dim, int page_size,
+         int cluster_size, int kv_format, int keys_are_rotated, float softmax_scale,
+         float rope_theta, std::uintptr_t stream_ptr) {
+        py::gil_scoped_release release;
+        fast_kernels::prefix_union_decode::prefix_union_decode_forward(
+            query_ptr, key_ptr, value_ptr, key_scales_ptr, value_scales_ptr, tasks_ptr,
+            shared_pages_ptr, tail_pages_ptr, consumers_ptr, scheduler_counter_ptr, output_ptr,
+            num_tasks, num_pages, num_q_heads, num_kv_heads, head_dim, page_size, cluster_size,
+            kv_format, keys_are_rotated, softmax_scale, rope_theta, stream_ptr);
+      },
+      py::arg("query_ptr"), py::arg("key_ptr"), py::arg("value_ptr"), py::arg("key_scales_ptr"),
+      py::arg("value_scales_ptr"), py::arg("tasks_ptr"), py::arg("shared_pages_ptr"),
+      py::arg("tail_pages_ptr"), py::arg("consumers_ptr"), py::arg("scheduler_counter_ptr"),
+      py::arg("output_ptr"), py::arg("num_tasks"), py::arg("num_pages"),
+      py::arg("num_q_heads"), py::arg("num_kv_heads"),
+      py::arg("head_dim"), py::arg("page_size"), py::arg("cluster_size"), py::arg("kv_format"),
       py::arg("keys_are_rotated"), py::arg("softmax_scale"), py::arg("rope_theta"),
       py::arg("stream_ptr"));
   m.def(
@@ -179,8 +205,14 @@ PYBIND11_MODULE(_native, m) {
   m.def("clustered_page_decode_forward",
         [unavailable](std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
                       std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
-                      std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, int, int, int,
-                      int, int, int, int, int, float, float, std::uintptr_t) { unavailable(); });
+                      std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t, int, int,
+                      int, int, int, int, int, int, int, int, int, float, float,
+                      std::uintptr_t) { unavailable(); });
+  m.def("prefix_union_decode_forward",
+        [unavailable](std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
+                      std::uintptr_t, std::uintptr_t, std::uintptr_t, std::uintptr_t,
+                      std::uintptr_t, std::uintptr_t, std::uintptr_t, int, int, int, int, int,
+                      int, int, int, int, float, float, std::uintptr_t) { unavailable(); });
   m.def("compute_arc_w4a16_group_sums", [unavailable](std::uintptr_t, std::uintptr_t, int, int, int,
                                                       std::uintptr_t) { unavailable(); });
   m.def("pack_arc_w4a16_packets",

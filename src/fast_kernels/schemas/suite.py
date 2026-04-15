@@ -18,6 +18,8 @@ class ShapeCase(BaseModel):
     head_dim: int | None = None
     gqa_group_size: int | None = None
     max_pages: int | None = None
+    shared_prefix_pages: int | None = None
+    prefix_group_size: int | None = None
 
     def dimensions(self) -> dict[str, int]:
         dims: dict[str, int] = {"batch": self.batch}
@@ -32,6 +34,8 @@ class ShapeCase(BaseModel):
             "head_dim",
             "gqa_group_size",
             "max_pages",
+            "shared_prefix_pages",
+            "prefix_group_size",
         ):
             value = getattr(self, field_name)
             if value is not None:

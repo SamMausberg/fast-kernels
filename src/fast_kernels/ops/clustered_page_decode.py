@@ -198,6 +198,48 @@ def _build_logical_pages(
     return key_pages.contiguous(), value_pages.contiguous()
 
 
+def _deduplicate_identical_pages(
+    logical_key_pages: Any,
+    logical_value_pages: Any,
+) -> tuple[Any, Any, Any]:
+    torch = _require_torch()
+    total_pages = int(logical_key_pages.shape[0])
+    if total_pages == 0:
+        empty_mapping = torch.empty((0,), device="cpu", dtype=torch.int64)
+        return logical_key_pages, logical_value_pages, empty_mapping
+
+    key_bytes_cpu = (
+        logical_key_pages.contiguous().view(torch.uint8).reshape(total_pages, -1).cpu().contiguous()
+    )
+    value_bytes_cpu = (
+        logical_value_pages.contiguous()
+        .view(torch.uint8)
+        .reshape(total_pages, -1)
+        .cpu()
+        .contiguous()
+    )
+    unique_indices: list[int] = []
+    logical_to_unique: list[int] = []
+    seen: dict[bytes, int] = {}
+    for logical_page in range(total_pages):
+        page_key = bytes(key_bytes_cpu[logical_page].tolist()) + bytes(
+            value_bytes_cpu[logical_page].tolist()
+        )
+        unique_index = seen.get(page_key)
+        if unique_index is None:
+            unique_index = len(unique_indices)
+            seen[page_key] = unique_index
+            unique_indices.append(logical_page)
+        logical_to_unique.append(unique_index)
+
+    unique_tensor = torch.tensor(unique_indices, device=logical_key_pages.device, dtype=torch.int64)
+    return (
+        logical_key_pages.index_select(0, unique_tensor).contiguous(),
+        logical_value_pages.index_select(0, unique_tensor).contiguous(),
+        torch.tensor(logical_to_unique, device="cpu", dtype=torch.int64),
+    )
+
+
 def _rotate_dense_keys(
     keys: Any,
     seq_lens: Any,
@@ -252,6 +294,47 @@ def _build_page_table(
     return page_table, physical_to_logical.to(dtype=torch.int64)
 
 
+def _build_page_table_from_logical_mapping(
+    seq_lens: Any,
+    *,
+    page_size: int,
+    logical_to_page: Any,
+    total_pages: int,
+    fragment_pages: bool,
+    seed: int | None,
+    device: Any,
+) -> tuple[Any, Any]:
+    torch = _require_torch()
+    batch = int(seq_lens.shape[0])
+    pages_per_request = _pages_per_request(seq_lens, page_size)
+    max_pages = int(pages_per_request.max().item()) if batch > 0 else 0
+    page_table = torch.full((batch, max_pages), -1, dtype=torch.int32)
+    if total_pages == 0:
+        return page_table, torch.empty((0,), device=device, dtype=torch.int64)
+
+    if fragment_pages:
+        generator = torch.Generator(device=device)
+        if seed is not None:
+            generator.manual_seed(seed)
+        physical_to_canonical = torch.randperm(total_pages, generator=generator, device=device)
+        canonical_to_physical = torch.empty_like(physical_to_canonical)
+        canonical_to_physical[physical_to_canonical] = torch.arange(total_pages, device=device)
+    else:
+        canonical_to_physical = torch.arange(total_pages, device=device)
+        physical_to_canonical = canonical_to_physical
+
+    logical_to_canonical = logical_to_page.to(device=device, dtype=torch.int64)
+    logical_to_physical = canonical_to_physical.index_select(0, logical_to_canonical)
+
+    page_cursor = 0
+    for request_index in range(batch):
+        num_pages = int(pages_per_request[request_index].item())
+        request_pages = logical_to_physical[page_cursor : page_cursor + num_pages]
+        page_table[request_index, :num_pages] = request_pages.to(dtype=torch.int32, device="cpu")
+        page_cursor += num_pages
+    return page_table, physical_to_canonical.to(dtype=torch.int64)
+
+
 def _reorder_physical_pages(logical_pages: Any, physical_to_logical: Any) -> Any:
     if int(physical_to_logical.numel()) == 0:
         return logical_pages
@@ -267,6 +350,7 @@ def pack_paged_kv_bf16(
     fragment_pages: bool = True,
     seed: int | None = None,
     key_rope_theta: float | None = None,
+    deduplicate_identical_pages: bool = False,
 ) -> PagedKVCache:
     torch = _require_torch()
     if keys.ndim != 4 or values.ndim != 4:
@@ -288,16 +372,37 @@ def pack_paged_kv_bf16(
     logical_key_pages, logical_value_pages = _build_logical_pages(
         keys_bf16, values_bf16, seq_lens_cpu, page_size=page_size
     )
-    page_table, physical_to_logical = _build_page_table(
-        seq_lens_cpu,
-        page_size=page_size,
-        total_pages=int(logical_key_pages.shape[0]),
-        fragment_pages=fragment_pages,
-        seed=seed,
-        device=keys_bf16.device,
-    )
-    key_pages = _reorder_physical_pages(logical_key_pages, physical_to_logical)
-    value_pages = _reorder_physical_pages(logical_value_pages, physical_to_logical)
+    physical_source_keys = logical_key_pages
+    physical_source_values = logical_value_pages
+    logical_to_physical_source = None
+    if deduplicate_identical_pages:
+        (
+            physical_source_keys,
+            physical_source_values,
+            logical_to_physical_source,
+        ) = _deduplicate_identical_pages(logical_key_pages, logical_value_pages)
+
+    if logical_to_physical_source is None:
+        page_table, physical_to_logical = _build_page_table(
+            seq_lens_cpu,
+            page_size=page_size,
+            total_pages=int(physical_source_keys.shape[0]),
+            fragment_pages=fragment_pages,
+            seed=seed,
+            device=keys_bf16.device,
+        )
+    else:
+        page_table, physical_to_logical = _build_page_table_from_logical_mapping(
+            seq_lens_cpu,
+            page_size=page_size,
+            logical_to_page=logical_to_physical_source,
+            total_pages=int(physical_source_keys.shape[0]),
+            fragment_pages=fragment_pages,
+            seed=seed,
+            device=keys_bf16.device,
+        )
+    key_pages = _reorder_physical_pages(physical_source_keys, physical_to_logical)
+    value_pages = _reorder_physical_pages(physical_source_values, physical_to_logical)
     return PagedKVCache(
         key_pages=key_pages,
         value_pages=value_pages,
@@ -379,6 +484,7 @@ def quantize_paged_kv_int8(
     fragment_pages: bool = True,
     seed: int | None = None,
     key_rope_theta: float | None = None,
+    deduplicate_identical_pages: bool = False,
 ) -> PagedKVCache:
     packed = pack_paged_kv_bf16(
         keys,
@@ -388,6 +494,7 @@ def quantize_paged_kv_int8(
         fragment_pages=fragment_pages,
         seed=seed,
         key_rope_theta=key_rope_theta,
+        deduplicate_identical_pages=deduplicate_identical_pages,
     )
     key_bytes, value_bytes, key_scales, value_scales = _quantize_kv_int8(
         packed.reference_key_pages, packed.reference_value_pages
@@ -419,6 +526,7 @@ def quantize_paged_kv_fp8(
     fragment_pages: bool = True,
     seed: int | None = None,
     key_rope_theta: float | None = None,
+    deduplicate_identical_pages: bool = False,
 ) -> PagedKVCache:
     packed = pack_paged_kv_bf16(
         keys,
@@ -428,6 +536,7 @@ def quantize_paged_kv_fp8(
         fragment_pages=fragment_pages,
         seed=seed,
         key_rope_theta=key_rope_theta,
+        deduplicate_identical_pages=deduplicate_identical_pages,
     )
     key_bytes, value_bytes, key_scales, value_scales = _quantize_kv_fp8(
         packed.reference_key_pages, packed.reference_value_pages

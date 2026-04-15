@@ -7,6 +7,7 @@ from typing import Literal
 
 from fast_kernels.benchmarking.clustered_page_decode import run_clustered_page_decode_suite
 from fast_kernels.benchmarking.decode_linear_w4a16 import run_decode_linear_w4a16_suite
+from fast_kernels.benchmarking.prefix_union_decode import run_prefix_union_decode_suite
 from fast_kernels.benchmarking.suites import load_suite
 from fast_kernels.env import collect_environment
 from fast_kernels.paths import default_results_root, repo_root
@@ -99,6 +100,8 @@ def _execute_suite(suite: BenchmarkSuite) -> tuple[list[BenchmarkCase], list[str
         return run_decode_linear_w4a16_suite(suite)
     if suite.family == "clustered_page_decode":
         return run_clustered_page_decode_suite(suite)
+    if suite.family == "prefix_union_decode":
+        return run_prefix_union_decode_suite(suite)
 
     return (
         _materialize_cases(suite),

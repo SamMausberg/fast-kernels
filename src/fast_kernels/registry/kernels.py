@@ -83,4 +83,34 @@ def kernel_registry() -> dict[str, KernelSpec]:
             maturity="experimental",
             ptx_hotspots=True,
         ),
+        "decode/prefix_union_decode_auto": KernelSpec(
+            kernel_id="decode/prefix_union_decode_auto",
+            family="prefix_union_decode",
+            description=(
+                "Auto-selected Blackwell prefix-union decode path with shared-page reuse and "
+                "cluster fallback."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
+        "decode/prefix_union_decode_union": KernelSpec(
+            kernel_id="decode/prefix_union_decode_union",
+            family="prefix_union_decode",
+            description=(
+                "Blackwell prefix-union decode path that stages shared prefix pages once per "
+                "cluster wave."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
+        "decode/prefix_union_decode_fallback": KernelSpec(
+            kernel_id="decode/prefix_union_decode_fallback",
+            family="prefix_union_decode",
+            description=(
+                "Prefix-union decode API routed through the existing clustered_page_decode "
+                "fallback path."
+            ),
+            maturity="experimental",
+            ptx_hotspots=True,
+        ),
     }

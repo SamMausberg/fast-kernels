@@ -1,0 +1,72 @@
+schema_version = 1
+id = "prefix_union_decode"
+family = "prefix_union_decode"
+description = "Blackwell shared-prefix paged decode suite with deduplicated physical KV pages."
+metric = "tokens_per_second"
+tags = ["decode", "attention", "paged_kv", "shared_prefix", "blackwell", "tcgen05"]
+dtypes = ["bf16"]
+layouts = ["bf16_kv", "fp8_kv", "int8_kv"]
+
+[kernels]
+ids = [
+  "decode/prefix_union_decode_auto",
+  "decode/prefix_union_decode_union",
+  "decode/prefix_union_decode_fallback",
+]
+
+[baselines]
+ids = [
+  "torch/reference_prefix_union_decode",
+]
+
+[tolerances]
+atol = 0.125
+rtol = 0.03
+
+[[shapes]]
+name = "gqa4_prefix4_page16"
+batch = 8
+page_size = 16
+max_seq_len = 512
+num_q_heads = 32
+num_kv_heads = 8
+head_dim = 128
+gqa_group_size = 4
+shared_prefix_pages = 4
+prefix_group_size = 4
+
+[[shapes]]
+name = "gqa4_prefix8_page16"
+batch = 8
+page_size = 16
+max_seq_len = 2048
+num_q_heads = 32
+num_kv_heads = 8
+head_dim = 128
+gqa_group_size = 4
+shared_prefix_pages = 8
+prefix_group_size = 4
+
+[[shapes]]
+name = "mqa8_prefix8_page32"
+batch = 8
+page_size = 32
+max_seq_len = 4096
+num_q_heads = 32
+num_kv_heads = 4
+head_dim = 128
+gqa_group_size = 8
+shared_prefix_pages = 8
+prefix_group_size = 4
+
+[[shapes]]
+name = "gqa2_prefix4_page32_h64"
+batch = 8
+page_size = 32
+max_seq_len = 1024
+num_q_heads = 16
+num_kv_heads = 8
+head_dim = 64
+gqa_group_size = 2
+shared_prefix_pages = 4
+prefix_group_size = 4
